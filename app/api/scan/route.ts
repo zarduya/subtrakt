@@ -1,4 +1,4 @@
-import { getServerSession } from "next-auth"
+import { getServerSession } from "next-auth/next"
 import { authOptions } from "../auth/options"
 import { NextResponse } from "next/server"
 import Anthropic from "@anthropic-ai/sdk"

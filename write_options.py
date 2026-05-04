@@ -1,4 +1,4 @@
-import GoogleProvider from "next-auth/providers/google"
+code = """import GoogleProvider from "next-auth/providers/google"
 
 export const authOptions = {
   providers: [
@@ -47,3 +47,9 @@ export const authOptions = {
     },
   },
 }
+"""
+
+with open("app/api/auth/options.ts", "w", encoding="utf-8") as f:
+    f.write(code)
+
+print("Done!")
