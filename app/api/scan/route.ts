@@ -9,7 +9,7 @@ export async function GET() {
   const session = await getServerSession(authOptions)
   if (!session) return NextResponse.json({ error: "Not signed in" }, { status: 401 })
 
-  const accessToken = (session as any).accessToken
+  const accessToken = session.accessToken
   if (!accessToken) return NextResponse.json({ error: "No access token" }, { status: 401 })
 
   const query = "subject:(subscription OR receipt OR invoice OR trial OR billing OR renewal)"
