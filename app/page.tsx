@@ -1,9 +1,11 @@
 "use client"
 
 import { signIn, useSession } from "next-auth/react"
+import { useRouter } from "next/navigation"
 
 export default function Home() {
   const { data: session } = useSession()
+  const router = useRouter()
 
   return (
     <main className="min-h-screen bg-[#0a0e1a] flex flex-col items-center justify-center text-white text-center px-6 relative overflow-hidden">
@@ -34,13 +36,16 @@ export default function Home() {
           <p className="text-[#00e5a0] font-syne font-bold text-lg">
             Welcome, {session.user?.name?.split(" ")[0]}! 👋
           </p>
-          <button className="bg-[#00e5a0] text-[#0a0e1a] font-syne font-bold text-base px-9 py-4 rounded-2xl hover:shadow-[0_12px_40px_rgba(0,229,160,0.35)] hover:-translate-y-1 transition-all duration-200">
+          <button
+            onClick={() => router.push("/dashboard")}
+            className="bg-[#00e5a0] text-[#0a0e1a] font-syne font-bold text-base px-9 py-4 rounded-2xl hover:shadow-[0_12px_40px_rgba(0,229,160,0.35)] hover:-translate-y-1 transition-all duration-200"
+          >
             🔍 Scan My Gmail
           </button>
         </div>
       ) : (
         <button
-          onClick={() => signIn("google")}
+          onClick={() => signIn("google", { callbackUrl: "/dashboard" })}
           className="bg-[#00e5a0] text-[#0a0e1a] font-syne font-bold text-base px-9 py-4 rounded-2xl hover:shadow-[0_12px_40px_rgba(0,229,160,0.35)] hover:-translate-y-1 transition-all duration-200"
         >
           🔍 Scan My Gmail — It's Free
