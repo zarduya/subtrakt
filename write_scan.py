@@ -1,4 +1,4 @@
-import { getServerSession } from "next-auth"
+code = """import { getServerSession } from "next-auth"
 import { authOptions } from "../auth/options"
 import { NextResponse } from "next/server"
 import Anthropic from "@anthropic-ai/sdk"
@@ -45,7 +45,7 @@ export async function GET() {
           max_tokens: 200,
           messages: [{
             role: "user",
-            content: "Analyze this email and extract subscription info. Reply with ONLY a JSON object, no markdown, no explanation.\n\nEmail subject: " + email.subject + "\nFrom: " + email.from + "\nDate: " + email.date + "\n\nJSON format:\n{\n  \"isSubscription\": true or false,\n  \"serviceName\": \"name of the service\",\n  \"amount\": null or number,\n  \"currency\": \"GBP or USD or INR etc\",\n  \"renewalDate\": null or \"YYYY-MM-DD\",\n  \"status\": \"active or cancelled or unknown\"\n}"
+            content: "Analyze this email and extract subscription info. Reply with ONLY a JSON object, no markdown, no explanation.\\n\\nEmail subject: " + email.subject + "\\nFrom: " + email.from + "\\nDate: " + email.date + "\\n\\nJSON format:\\n{\\n  \\"isSubscription\\": true or false,\\n  \\"serviceName\\": \\"name of the service\\",\\n  \\"amount\\": null or number,\\n  \\"currency\\": \\"GBP or USD or INR etc\\",\\n  \\"renewalDate\\": null or \\"YYYY-MM-DD\\",\\n  \\"status\\": \\"active or cancelled or unknown\\"\\n}"
           }]
         })
         const text = message.content[0].type === "text" ? message.content[0].text : ""
@@ -61,3 +61,9 @@ export async function GET() {
   const filtered = subscriptions.filter((s) => s.isSubscription)
   return NextResponse.json({ subscriptions: filtered, total: filtered.length })
 }
+"""
+
+with open("app/api/scan/route.ts", "w", encoding="utf-8") as f:
+    f.write(code)
+
+print("Done! File written successfully.")
