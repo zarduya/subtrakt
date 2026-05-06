@@ -124,21 +124,27 @@ export async function GET() {
         html: emailHtml(reminder.service_name, reminder.renewal_date, daysUntil),
       })
 
-      if (emailErr) throw emailErr
+      if (emailErr) {
+        console.error(`[send-reminders] resend error for ${reminder.user_email}/${reminder.service_name}:`, JSON.stringify(emailErr, null, 2))
+        errors.push(`${reminder.user_email}/${reminder.service_name}: ${JSON.stringify(emailErr)}`)
+        continue
+      }
 
       const { error: updateErr } = await supabase
         .from("reminders")
         .update({ sent: true })
         .eq("id", reminder.id)
 
-      if (updateErr) console.error(`[send-reminders] failed to mark sent for id=${reminder.id}:`, updateErr)
+      if (updateErr) console.error(`[send-reminders] failed to mark sent for id=${reminder.id}:`, JSON.stringify(updateErr))
 
       sent++
       console.log(`[send-reminders] sent to ${reminder.user_email} for ${reminder.service_name}`)
     } catch (err) {
-      const msg = `${reminder.user_email}/${reminder.service_name}: ${err}`
-      console.error("[send-reminders] email error:", msg)
-      errors.push(msg)
+      const serialised = err instanceof Error
+        ? { message: err.message, name: err.name, stack: err.stack }
+        : JSON.stringify(err)
+      console.error(`[send-reminders] unexpected error for ${reminder.user_email}/${reminder.service_name}:`, JSON.stringify(serialised, null, 2))
+      errors.push(`${reminder.user_email}/${reminder.service_name}: ${JSON.stringify(serialised)}`)
     }
   }
 
