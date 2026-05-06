@@ -142,8 +142,8 @@ export async function GET() {
       const oneDay = new Date(renewal)
       oneDay.setDate(oneDay.getDate() - 1)
       return [
-        { user_email: userEmail, service_name: sub.serviceName, remind_at: sevenDay.toISOString().split("T")[0] },
-        { user_email: userEmail, service_name: sub.serviceName, remind_at: oneDay.toISOString().split("T")[0] },
+        { user_email: userEmail, service_name: sub.serviceName, renewal_date: sub.renewalDate, remind_at: sevenDay.toISOString().split("T")[0], sent: false },
+        { user_email: userEmail, service_name: sub.serviceName, renewal_date: sub.renewalDate, remind_at: oneDay.toISOString().split("T")[0], sent: false },
       ]
     })
     const { error: remindErr } = await supabase.from("reminders").insert(reminderRows)

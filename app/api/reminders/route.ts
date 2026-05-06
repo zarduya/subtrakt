@@ -26,8 +26,8 @@ export async function POST() {
     const oneDay = new Date(renewal)
     oneDay.setDate(oneDay.getDate() - 1)
     return [
-      { user_email: userEmail, service_name: sub.service_name, remind_at: sevenDay.toISOString().split("T")[0] },
-      { user_email: userEmail, service_name: sub.service_name, remind_at: oneDay.toISOString().split("T")[0] },
+      { user_email: userEmail, service_name: sub.service_name, renewal_date: sub.renewal_date, remind_at: sevenDay.toISOString().split("T")[0], sent: false },
+      { user_email: userEmail, service_name: sub.service_name, renewal_date: sub.renewal_date, remind_at: oneDay.toISOString().split("T")[0], sent: false },
     ]
   })
 
