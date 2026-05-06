@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useSession, signOut } from "next-auth/react"
 import { useRouter } from "next/navigation"
 
@@ -232,25 +232,38 @@ export default function Dashboard() {
   const router = useRouter()
   const [data, setData] = useState<ScanData>({ subscriptions: [], trials: [], total: 0 })
   const [loading, setLoading] = useState(true)
+  const [loadingMsg, setLoadingMsg] = useState("Loading subscriptions…")
   const [scanning, setScanning] = useState(false)
+  const autoScanned = useRef(false)
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/")
   }, [status, router])
 
   useEffect(() => {
-    if (status === "authenticated") {
-      fetch("/api/subscriptions")
-        .then((r) => r.json())
-        .then((d: Partial<ScanData>) => {
-          setData({
-            subscriptions: d.subscriptions ?? [],
-            trials: d.trials ?? [],
-            total: d.total ?? 0,
-          })
+    if (status !== "authenticated") return
+
+    fetch("/api/subscriptions")
+      .then((r) => r.json())
+      .then(async (d: Partial<ScanData>) => {
+        const total = d.total ?? 0
+        if (total > 0) {
+          setData({ subscriptions: d.subscriptions ?? [], trials: d.trials ?? [], total })
           setLoading(false)
-        })
-    }
+          return
+        }
+        // DB empty — auto-scan once (ref guards against React strict-mode double-fire)
+        if (autoScanned.current) { setLoading(false); return }
+        autoScanned.current = true
+        setLoadingMsg("Scanning your inbox with Claude…")
+        try {
+          const scan: Partial<ScanData> = await fetch("/api/scan").then((r) => r.json())
+          setData({ subscriptions: scan.subscriptions ?? [], trials: scan.trials ?? [], total: scan.total ?? 0 })
+        } finally {
+          setLoading(false)
+        }
+      })
+      .catch(() => setLoading(false))
   }, [status])
 
   async function handleRescan() {
@@ -307,7 +320,7 @@ export default function Dashboard() {
           {status === "loading" || loading ? (
             <div className="flex items-center gap-3 text-[#71717a] py-4">
               <div className="w-4 h-4 border border-[#71717a] border-t-[#fafafa] rounded-full animate-spin" />
-              <span className="text-[13px]">Loading subscriptions…</span>
+              <span className="text-[13px]">{loadingMsg}</span>
             </div>
           ) : (
             <>
