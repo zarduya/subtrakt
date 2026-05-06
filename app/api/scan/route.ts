@@ -6,35 +6,21 @@ import { supabase } from "@/lib/supabase"
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! })
 
-const PROMPT = `You analyze email metadata to identify ONLY recurring subscription billing emails from software/digital services.
+const SYSTEM_PROMPT = `You extract subscription data from email metadata. These emails were pre-filtered by a Gmail search for subscription-related keywords, so be generous: when in doubt, classify as a subscription.
 
-INCLUDE (isSubscription: true):
-- Software or app subscriptions (Netflix, Spotify, Adobe, Notion, Slack, GitHub, etc.)
-- SaaS tool billing and renewal notices
-- Cloud service subscriptions (AWS, Google Cloud, Azure, etc.)
-- Streaming or digital service renewals
-- Free trial notifications for any of the above
+Mark isSubscription: true for ANY recurring digital service — streaming (Netflix, Spotify, Disney+, Apple TV+, YouTube Premium), software/SaaS (Adobe, Notion, Slack, GitHub, Figma, Zoom, Dropbox, 1Password, Dashlane), cloud storage (Google One, iCloud, OneDrive), productivity tools, gaming subscriptions (Xbox Game Pass, PlayStation Plus, Nintendo Online), VPN services (NordVPN, ExpressVPN), news/media (Substack, Patreon, NYT), cloud hosting (AWS, GCP, Azure, Vercel, Cloudflare), domain or email hosting, and anything similar.
 
-DO NOT INCLUDE (isSubscription: false):
-- Bank statements, credit card statements, or financial account summaries
-- Stock, crypto, or investment portfolio emails
-- One-time product purchase receipts (physical goods, software licenses without recurring billing)
-- Food delivery or restaurant orders (Uber Eats, DoorDash, Deliveroo, Just Eat)
-- Cinema tickets, event tickets, or travel bookings
-- Email verification codes, OTPs, or login security alerts
-- Shipping, tracking, or delivery notifications
-- News newsletters or marketing emails that don't represent a subscription charge
-- Social media notifications
+Mark isSubscription: false ONLY for clearly non-recurring emails: login codes/OTPs, password resets, package delivery notifications, or one-time physical product purchases with no mention of recurring billing.
 
-Set isTrial to true ONLY if the email explicitly mentions words like "free trial", "trial period", "trial ends", "trial ending", or "trial expir".
+Set isTrial: true only if the email explicitly says "free trial", "trial period", "trial ends", or "trial expir".
 
-Reply with ONLY valid JSON, no markdown, no explanation:
+Reply with ONLY valid JSON — no markdown fences, no explanation:
 {
   "isSubscription": true or false,
   "isTrial": true or false,
-  "serviceName": "exact name of the service or product",
-  "amount": null or number (digits only, no currency symbol),
-  "currency": null or "USD" or "GBP" or "EUR" or "INR" or other ISO 4217 code,
+  "serviceName": "name of the service",
+  "amount": null or number (no currency symbol),
+  "currency": null or ISO 4217 code like "USD" / "GBP" / "EUR" / "INR",
   "billingCycle": "monthly" or "annual" or "unknown",
   "renewalDate": null or "YYYY-MM-DD",
   "status": "active" or "cancelled" or "unknown"
@@ -48,8 +34,8 @@ export async function GET() {
   if (!accessToken) return NextResponse.json({ error: "No access token" }, { status: 401 })
 
   const query = [
-    "subject:(subscription OR billing OR renewal OR \"free trial\" OR \"trial ends\" OR \"auto-renew\" OR invoice OR \"your plan\" OR \"plan renewal\" OR \"membership\")",
-    "-subject:(OTP OR \"one-time password\" OR \"verification code\" OR \"sign-in code\" OR \"login code\" OR \"password reset\" OR \"order confirmation\" OR \"your order\" OR shipment OR delivered OR ticket OR cinema)",
+    "subject:(subscription OR billing OR renewal OR receipt OR payment OR invoice OR \"free trial\" OR \"trial ends\" OR \"auto-renew\" OR \"your plan\" OR \"plan renewal\" OR membership OR charged OR \"your account\")",
+    "-subject:(OTP OR \"one-time password\" OR \"verification code\" OR \"sign-in code\" OR \"login code\" OR \"password reset\" OR shipment OR delivered OR tracking)",
   ].join(" ")
 
   const searchRes = await fetch(
@@ -57,6 +43,7 @@ export async function GET() {
     { headers: { Authorization: `Bearer ${accessToken}` } }
   )
   const searchData = await searchRes.json()
+  console.log("[scan] Gmail search returned", searchData.messages?.length ?? 0, "messages")
   if (!searchData.messages || searchData.messages.length === 0) {
     return NextResponse.json({ subscriptions: [], trials: [], total: 0 })
   }
@@ -72,6 +59,7 @@ export async function GET() {
       const subject = headers.find((h) => h.name === "Subject")?.value || "No subject"
       const from = headers.find((h) => h.name === "From")?.value || "Unknown"
       const date = headers.find((h) => h.name === "Date")?.value || ""
+      console.log(`[scan] email: from="${from}" subject="${subject}"`)
       return { id: msg.id, subject, from, date }
     })
   )
@@ -79,17 +67,19 @@ export async function GET() {
   const results = await Promise.all(
     emails.map(async (email) => {
       try {
-        const content = `${PROMPT}\n\nEmail subject: ${email.subject}\nFrom: ${email.from}\nDate: ${email.date}`
         const message = await anthropic.messages.create({
           model: "claude-haiku-4-5-20251001",
           max_tokens: 300,
-          messages: [{ role: "user", content }],
+          system: SYSTEM_PROMPT,
+          messages: [{ role: "user", content: `Subject: ${email.subject}\nFrom: ${email.from}\nDate: ${email.date}` }],
         })
         const text = message.content[0].type === "text" ? message.content[0].text : ""
-        const cleaned = text.replace(/```json|```/g, "").trim()
+        const cleaned = text.replace(/```json\n?|```/g, "").trim()
         const parsed = JSON.parse(cleaned)
+        console.log(`[scan] claude result for "${email.subject}":`, JSON.stringify(parsed))
         return { ...parsed, emailId: email.id, from: email.from, subject: email.subject, date: email.date }
-      } catch {
+      } catch (err) {
+        console.error(`[scan] claude error for "${email.subject}":`, err)
         return { isSubscription: false, emailId: email.id }
       }
     })
@@ -117,10 +107,13 @@ export async function GET() {
 
   // Persist to Supabase — replace existing rows for this user
   const userEmail = session.user!.email!
-  await supabase.from("subscriptions").delete().eq("user_email", userEmail)
+  console.log(`[scan] saving ${deduped.length} subscriptions to Supabase for ${userEmail}`)
+
+  const { error: deleteErr } = await supabase.from("subscriptions").delete().eq("user_email", userEmail)
+  if (deleteErr) console.error("[scan] supabase delete error:", deleteErr)
 
   if (deduped.length > 0) {
-    await supabase.from("subscriptions").insert(
+    const { error: insertErr } = await supabase.from("subscriptions").insert(
       deduped.map((sub) => ({
         user_email: userEmail,
         service_name: sub.serviceName,
@@ -134,25 +127,28 @@ export async function GET() {
         is_trial: sub.isTrial,
       }))
     )
+    if (insertErr) console.error("[scan] supabase insert error:", insertErr)
+    else console.log(`[scan] inserted ${deduped.length} rows successfully`)
   }
 
   // Create renewal reminders (7-day and 1-day) for subscriptions with a known renewal date
   const withDate = deduped.filter((s) => s.renewalDate)
   if (withDate.length > 0) {
     await supabase.from("reminders").delete().eq("user_email", userEmail)
-    await supabase.from("reminders").insert(
-      withDate.flatMap((sub) => {
-        const renewal = new Date(sub.renewalDate!)
-        const sevenDay = new Date(renewal)
-        sevenDay.setDate(sevenDay.getDate() - 7)
-        const oneDay = new Date(renewal)
-        oneDay.setDate(oneDay.getDate() - 1)
-        return [
-          { user_email: userEmail, service_name: sub.serviceName, remind_at: sevenDay.toISOString().split("T")[0] },
-          { user_email: userEmail, service_name: sub.serviceName, remind_at: oneDay.toISOString().split("T")[0] },
-        ]
-      })
-    )
+    const reminderRows = withDate.flatMap((sub) => {
+      const renewal = new Date(sub.renewalDate!)
+      const sevenDay = new Date(renewal)
+      sevenDay.setDate(sevenDay.getDate() - 7)
+      const oneDay = new Date(renewal)
+      oneDay.setDate(oneDay.getDate() - 1)
+      return [
+        { user_email: userEmail, service_name: sub.serviceName, remind_at: sevenDay.toISOString().split("T")[0] },
+        { user_email: userEmail, service_name: sub.serviceName, remind_at: oneDay.toISOString().split("T")[0] },
+      ]
+    })
+    const { error: remindErr } = await supabase.from("reminders").insert(reminderRows)
+    if (remindErr) console.error("[scan] supabase reminders insert error:", remindErr)
+    else console.log(`[scan] created ${reminderRows.length} reminders`)
   }
 
   return NextResponse.json({ subscriptions, trials, total: deduped.length })
