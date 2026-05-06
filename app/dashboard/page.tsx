@@ -232,6 +232,7 @@ export default function Dashboard() {
   const router = useRouter()
   const [data, setData] = useState<ScanData>({ subscriptions: [], trials: [], total: 0 })
   const [loading, setLoading] = useState(true)
+  const [scanning, setScanning] = useState(false)
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/")
@@ -239,7 +240,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (status === "authenticated") {
-      fetch("/api/scan")
+      fetch("/api/subscriptions")
         .then((r) => r.json())
         .then((d: Partial<ScanData>) => {
           setData({
@@ -251,6 +252,20 @@ export default function Dashboard() {
         })
     }
   }, [status])
+
+  async function handleRescan() {
+    setScanning(true)
+    try {
+      const d: Partial<ScanData> = await fetch("/api/scan").then((r) => r.json())
+      setData({
+        subscriptions: d.subscriptions ?? [],
+        trials: d.trials ?? [],
+        total: d.total ?? 0,
+      })
+    } finally {
+      setScanning(false)
+    }
+  }
 
   const { subscriptions, trials } = data
   const active = subscriptions.filter((s) => s.status === "active")
@@ -265,19 +280,34 @@ export default function Dashboard() {
       {/* Main */}
       <div className="flex-1 overflow-auto">
         {/* Page header */}
-        <div className="px-10 pt-10 pb-8 border-b border-[#1c1c1e]">
-          <h1 className="font-space font-semibold text-[22px] text-[#fafafa] leading-none mb-1">
-            Overview
-          </h1>
-          <p className="text-[13px] text-[#71717a]">Detected from your Gmail by Claude</p>
+        <div className="px-10 pt-10 pb-8 border-b border-[#1c1c1e] flex items-start justify-between gap-4">
+          <div>
+            <h1 className="font-space font-semibold text-[22px] text-[#fafafa] leading-none mb-1">
+              Overview
+            </h1>
+            <p className="text-[13px] text-[#71717a]">Detected from your Gmail by Claude</p>
+          </div>
+          <button
+            onClick={handleRescan}
+            disabled={scanning || loading}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg text-[13px] font-medium bg-[#111113] border border-[#1c1c1e] text-[#71717a] hover:text-[#fafafa] hover:border-[#3f3f46] transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed mt-0.5"
+          >
+            {scanning ? (
+              <>
+                <div className="w-3 h-3 border border-[#71717a] border-t-[#fafafa] rounded-full animate-spin" />
+                Scanning…
+              </>
+            ) : (
+              "Rescan Gmail"
+            )}
+          </button>
         </div>
 
         <div className="px-10 py-10 max-w-4xl">
           {status === "loading" || loading ? (
-            /* Loading state */
             <div className="flex items-center gap-3 text-[#71717a] py-4">
               <div className="w-4 h-4 border border-[#71717a] border-t-[#fafafa] rounded-full animate-spin" />
-              <span className="text-[13px]">Scanning your inbox with Claude...</span>
+              <span className="text-[13px]">Loading subscriptions…</span>
             </div>
           ) : (
             <>

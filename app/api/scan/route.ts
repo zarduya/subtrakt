@@ -2,6 +2,7 @@ import { getServerSession } from "next-auth/next"
 import { authOptions } from "../auth/options"
 import { NextResponse } from "next/server"
 import Anthropic from "@anthropic-ai/sdk"
+import { supabase } from "@/lib/supabase"
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! })
 
@@ -113,6 +114,46 @@ export async function GET() {
 
   const trials = deduped.filter((s) => s.isTrial)
   const subscriptions = deduped.filter((s) => !s.isTrial)
+
+  // Persist to Supabase — replace existing rows for this user
+  const userEmail = session.user!.email!
+  await supabase.from("subscriptions").delete().eq("user_email", userEmail)
+
+  if (deduped.length > 0) {
+    await supabase.from("subscriptions").insert(
+      deduped.map((sub) => ({
+        user_email: userEmail,
+        service_name: sub.serviceName,
+        status: sub.status,
+        amount: sub.amount,
+        currency: sub.currency,
+        renewal_date: sub.renewalDate,
+        billing_cycle: sub.billingCycle,
+        from_email: sub.from,
+        subject: sub.subject,
+        is_trial: sub.isTrial,
+      }))
+    )
+  }
+
+  // Create renewal reminders (7-day and 1-day) for subscriptions with a known renewal date
+  const withDate = deduped.filter((s) => s.renewalDate)
+  if (withDate.length > 0) {
+    await supabase.from("reminders").delete().eq("user_email", userEmail)
+    await supabase.from("reminders").insert(
+      withDate.flatMap((sub) => {
+        const renewal = new Date(sub.renewalDate!)
+        const sevenDay = new Date(renewal)
+        sevenDay.setDate(sevenDay.getDate() - 7)
+        const oneDay = new Date(renewal)
+        oneDay.setDate(oneDay.getDate() - 1)
+        return [
+          { user_email: userEmail, service_name: sub.serviceName, remind_at: sevenDay.toISOString().split("T")[0] },
+          { user_email: userEmail, service_name: sub.serviceName, remind_at: oneDay.toISOString().split("T")[0] },
+        ]
+      })
+    )
+  }
 
   return NextResponse.json({ subscriptions, trials, total: deduped.length })
 }
