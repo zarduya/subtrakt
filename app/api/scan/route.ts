@@ -26,18 +26,25 @@ Reply with ONLY valid JSON, no markdown fences, no explanation:
 {"isSubscription":true,"serviceName":"...","status":"active","amount":null,"currency":null,"billingCycle":null,"renewalDate":null,"lastChargeDate":null,"isTrial":false,"trialEndDate":null}`
 
 // ─── Alias map: normalized name → canonical group key ────────────────────────
+// Explicit remaps applied after all stripping: normalized key → canonical key
 const ALIAS_MAP: Record<string, string> = {
-  anthropic: "claude",
+  "anthropic": "claude",
+  "anthropic claude": "claude",
 }
 
-const STRIP_SUFFIXES_RE = /\b(ai|vpn|pro|plus|premium|subscription|membership|app)\b/gi
+// Strip "the / a / an" only at the very start of the name
+const STRIP_LEADING_ARTICLE_RE = /^(the|an?)\s+/i
+// Strip plan-tier and descriptor words (extended list)
+const STRIP_PLAN_WORDS_RE =
+  /\b(ai|vpn|pro|plus|premium|basic|standard|individual|family|personal|plan|subscription|membership|app)\b/gi
 const STRIP_PUNCT_RE = /[^\w\s]/g
 
 function normalizeName(name: string): string {
   const n = name
     .toLowerCase()
     .replace(STRIP_PUNCT_RE, " ")
-    .replace(STRIP_SUFFIXES_RE, " ")
+    .replace(STRIP_LEADING_ARTICLE_RE, "")
+    .replace(STRIP_PLAN_WORDS_RE, " ")
     .replace(/\s+/g, " ")
     .trim()
   return ALIAS_MAP[n] ?? n
@@ -328,12 +335,42 @@ ${email.bodyText}`
     groups.get(canonical)!.push(sub)
   }
 
+  // ─── Containment merge: absorb longer keys that contain a shorter key as a ──
+  // contiguous word sequence (e.g. "new york times" absorbs "new york times digital")
+  {
+    const snapshot = Array.from(groups.keys())
+    for (const shorter of snapshot) {
+      const sw = shorter.split(" ")
+      if (sw.length < 2) continue          // single-word keys: skip to avoid false merges
+      if (!groups.has(shorter)) continue   // already absorbed into something else
+      for (const longer of snapshot) {
+        if (longer === shorter || !groups.has(longer)) continue
+        const lw = longer.split(" ")
+        if (lw.length <= sw.length) continue
+        // Check if sw appears as a contiguous word run anywhere inside lw
+        const found = lw.some((_, i) => sw.every((w, j) => lw[i + j] === w))
+        if (found) {
+          groups.get(shorter)!.push(...groups.get(longer)!)
+          groups.delete(longer)
+        }
+      }
+    }
+  }
+
   const todayStr = todayUTC().toISOString().split("T")[0]
 
   const rawDeduped: ParsedSub[] = []
   for (const [, group] of groups) {
     group.sort((a, b) => parseInt(b.internalDate || "0") - parseInt(a.internalDate || "0"))
     const newest = group[0]
+
+    // Pick the display name with the most words (most complete/official looking);
+    // fall back to the most recent email's name on ties.
+    const displayName = group.reduce((best, s) => {
+      const bw = best.split(" ").length
+      const sw = (s.serviceName ?? "").split(" ").length
+      return sw > bw ? s.serviceName! : best
+    }, newest.serviceName ?? "")
 
     // Merge: most recent non-null value per field
     let amount: number | null = null
@@ -366,7 +403,17 @@ ${email.bodyText}`
     const status = newest.status
     if (status === "cancelled") renewalDate = null
 
-    rawDeduped.push({ ...newest, amount, currency, billingCycle, renewalDate, lastChargeDate, trialEndDate, status })
+    rawDeduped.push({
+      ...newest,
+      serviceName: displayName,
+      amount,
+      currency,
+      billingCycle,
+      renewalDate,
+      lastChargeDate,
+      trialEndDate,
+      status,
+    })
   }
 
   // ─── Handle past trials ──────────────────────────────────────────────────
