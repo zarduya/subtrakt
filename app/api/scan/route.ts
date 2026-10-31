@@ -26,6 +26,33 @@ Rules:
 Reply with ONLY valid JSON, no markdown fences, no explanation:
 {"isSubscription":true,"serviceName":"...","status":"active","amount":null,"currency":null,"billingCycle":null,"renewalDate":null,"lastChargeDate":null,"isTrial":false,"trialEndDate":null}`
 
+// ─── Alias map: normalized name → canonical group key ────────────────────────
+const ALIAS_MAP: Record<string, string> = {
+  anthropic: "claude",
+}
+
+const STRIP_SUFFIXES_RE = /\b(ai|vpn|pro|plus|premium|subscription|membership|app)\b/gi
+const STRIP_PUNCT_RE = /[^\w\s]/g
+
+function normalizeName(name: string): string {
+  const n = name
+    .toLowerCase()
+    .replace(STRIP_PUNCT_RE, " ")
+    .replace(STRIP_SUFFIXES_RE, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  return ALIAS_MAP[n] ?? n
+}
+
+function senderDomain(from: string): string {
+  const host = from.match(/@([\w.-]+)/)?.[1]?.toLowerCase() ?? ""
+  const parts = host.split(".")
+  if (parts.length < 2) return host
+  return parts.slice(-2).join(".")
+}
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
 interface GmailPart {
   mimeType?: string
   body?: { data?: string; size?: number }
@@ -56,6 +83,8 @@ interface ParsedSub {
   date?: string
   internalDate?: string
 }
+
+// ─── Body extraction ─────────────────────────────────────────────────────────
 
 function decodeBase64Url(data: string): string {
   try {
@@ -89,9 +118,7 @@ function extractBodyText(payload: GmailPart): string {
     } else if (mime === "text/html" && part.body?.data) {
       htmlText += decodeBase64Url(part.body.data) + "\n"
     }
-    if (part.parts) {
-      for (const p of part.parts) walk(p)
-    }
+    if (part.parts) for (const p of part.parts) walk(p)
   }
 
   walk(payload)
@@ -110,9 +137,7 @@ function trimToRelevant(text: string, maxLen = 3000): string {
 
   for (let i = 0; i < words.length; i++) {
     if (RELEVANT_RE.test(words[i])) {
-      for (let j = Math.max(0, i - WINDOW); j < Math.min(words.length, i + WINDOW); j++) {
-        keep.add(j)
-      }
+      for (let j = Math.max(0, i - WINDOW); j < Math.min(words.length, i + WINDOW); j++) keep.add(j)
     }
   }
 
@@ -129,33 +154,55 @@ function trimToRelevant(text: string, maxLen = 3000): string {
   return result.trim().slice(0, maxLen)
 }
 
-async function processInBatches<T, R>(items: T[], batchSize: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = []
-  for (let i = 0; i < items.length; i += batchSize) {
-    const batch = items.slice(i, i + batchSize)
-    results.push(...(await Promise.all(batch.map(fn))))
-  }
-  return results
+// ─── Date helpers ─────────────────────────────────────────────────────────────
+
+function todayUTC(): Date {
+  const d = new Date()
+  d.setUTCHours(0, 0, 0, 0)
+  return d
 }
 
-function computeNextRenewal(lastCharge: string, billingCycle: string): string | null {
-  const base = new Date(lastCharge)
+/** Roll dateStr forward by billingCycle until it is >= today. Returns null if billingCycle unknown. */
+function rollDateForward(dateStr: string, billingCycle: string | null | undefined): string | null {
+  if (!billingCycle) return null
+  const base = new Date(dateStr)
   if (isNaN(base.getTime())) return null
-  const now = new Date()
+  const today = todayUTC()
   let next = new Date(base)
 
   if (billingCycle === "monthly") {
-    while (next <= now) next = new Date(next.setMonth(next.getMonth() + 1))
+    while (next < today) next = new Date(new Date(next).setMonth(next.getMonth() + 1))
   } else if (billingCycle === "yearly") {
-    while (next <= now) next = new Date(next.setFullYear(next.getFullYear() + 1))
+    while (next < today) next = new Date(new Date(next).setFullYear(next.getFullYear() + 1))
   } else if (billingCycle === "weekly") {
-    while (next <= now) next = new Date(next.setDate(next.getDate() + 7))
+    while (next < today) next = new Date(new Date(next).setDate(next.getDate() + 7))
   } else {
     return null
   }
 
   return next.toISOString().split("T")[0]
 }
+
+/** Fix a renewal date: if in the past, roll forward or null out. */
+function fixRenewalDate(renewalDate: string | null | undefined, billingCycle: string | null | undefined): string | null {
+  if (!renewalDate) return null
+  const d = new Date(renewalDate)
+  if (isNaN(d.getTime())) return null
+  if (d >= todayUTC()) return renewalDate
+  return rollDateForward(renewalDate, billingCycle) // returns null if billingCycle unknown
+}
+
+// ─── Batch helper ─────────────────────────────────────────────────────────────
+
+async function processInBatches<T, R>(items: T[], batchSize: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = []
+  for (let i = 0; i < items.length; i += batchSize) {
+    results.push(...(await Promise.all(items.slice(i, i + batchSize).map(fn))))
+  }
+  return results
+}
+
+// ─── Route ───────────────────────────────────────────────────────────────────
 
 export async function GET() {
   const session = await getServerSession(authOptions)
@@ -171,7 +218,6 @@ export async function GET() {
     "-category:promotions",
   ].join(" ")
 
-  // Fetch up to 200 message IDs, following nextPageToken
   const allMessageIds: { id: string }[] = []
   let pageToken: string | undefined
 
@@ -194,10 +240,7 @@ export async function GET() {
   }
 
   console.log("[scan] Gmail search returned", allMessageIds.length, "messages")
-
-  if (allMessageIds.length === 0) {
-    return NextResponse.json({ subscriptions: [], trials: [], total: 0 })
-  }
+  if (allMessageIds.length === 0) return NextResponse.json({ subscriptions: [], trials: [], total: 0 })
 
   // Fetch full message content in batches of 5
   const emails = await processInBatches(
@@ -264,22 +307,36 @@ ${email.bodyText}`
 
   const allSubs = results.filter((s) => s.isSubscription)
 
-  // Deduplicate by normalized serviceName
+  // ─── Deduplicate by normalized name OR sender domain ──────────────────────
+  const nameKeyToCanonical = new Map<string, string>()
+  const domainToCanonical = new Map<string, string>()
   const groups = new Map<string, ParsedSub[]>()
+
   for (const sub of allSubs) {
-    const key = (sub.serviceName || "").toLowerCase().trim()
-    if (!key) continue
-    if (!groups.has(key)) groups.set(key, [])
-    groups.get(key)!.push(sub)
+    const nameKey = normalizeName(sub.serviceName || "")
+    if (!nameKey) continue
+    const domain = senderDomain(sub.from || "")
+
+    const canonical =
+      ALIAS_MAP[nameKey] ??
+      nameKeyToCanonical.get(nameKey) ??
+      (domain ? domainToCanonical.get(domain) : undefined) ??
+      nameKey
+
+    if (!nameKeyToCanonical.has(nameKey)) nameKeyToCanonical.set(nameKey, canonical)
+    if (domain && !domainToCanonical.has(domain)) domainToCanonical.set(domain, canonical)
+    if (!groups.has(canonical)) groups.set(canonical, [])
+    groups.get(canonical)!.push(sub)
   }
 
-  const deduped: ParsedSub[] = []
+  const todayStr = todayUTC().toISOString().split("T")[0]
+
+  const rawDeduped: ParsedSub[] = []
   for (const [, group] of groups) {
-    // Sort by internalDate descending — most recent first
     group.sort((a, b) => parseInt(b.internalDate || "0") - parseInt(a.internalDate || "0"))
     const newest = group[0]
 
-    // Merge: take first non-null value from most recent to oldest
+    // Merge: most recent non-null value per field
     let amount: number | null = null
     let currency: string | null = null
     let billingCycle: string | null = null
@@ -298,22 +355,45 @@ ${email.bodyText}`
 
     // Fill missing renewal date from lastChargeDate + billingCycle
     if (!renewalDate && lastChargeDate && billingCycle) {
-      renewalDate = computeNextRenewal(lastChargeDate, billingCycle)
+      renewalDate = rollDateForward(lastChargeDate, billingCycle)
     }
     // For trials, fall back to trialEndDate
-    if (!renewalDate && newest.isTrial && trialEndDate) {
-      renewalDate = trialEndDate
-    }
+    if (!renewalDate && newest.isTrial && trialEndDate) renewalDate = trialEndDate
 
-    deduped.push({ ...newest, amount, currency, billingCycle, renewalDate, lastChargeDate, trialEndDate })
+    // Fix past renewal dates
+    renewalDate = fixRenewalDate(renewalDate, billingCycle)
+
+    // Cancelled: no renewal date
+    const status = newest.status
+    if (status === "cancelled") renewalDate = null
+
+    rawDeduped.push({ ...newest, amount, currency, billingCycle, renewalDate, lastChargeDate, trialEndDate, status })
   }
 
-  console.log("[scan] final deduplicated list:", JSON.stringify(deduped.map((s) => ({ serviceName: s.serviceName, status: s.status, renewalDate: s.renewalDate, amount: s.amount }))))
+  // ─── Handle past trials ──────────────────────────────────────────────────
+  const deduped: ParsedSub[] = []
+  for (const sub of rawDeduped) {
+    if (sub.isTrial && sub.trialEndDate && sub.trialEndDate < todayStr) {
+      const hasLaterCharge = !!(sub.lastChargeDate && sub.lastChargeDate > sub.trialEndDate!)
+      const hasEvidence = hasLaterCharge || !!sub.billingCycle
+      if (hasEvidence) {
+        // Promote to active subscription
+        const base = sub.lastChargeDate ?? sub.trialEndDate!
+        const renewal = sub.billingCycle ? rollDateForward(base, sub.billingCycle) : null
+        deduped.push({ ...sub, isTrial: false, status: "active", renewalDate: renewal })
+      }
+      // else: drop the expired trial entirely
+    } else {
+      deduped.push(sub)
+    }
+  }
+
+  console.log("[scan] final deduplicated list:", JSON.stringify(deduped.map((s) => ({ serviceName: s.serviceName, status: s.status, renewalDate: s.renewalDate, amount: s.amount, currency: s.currency }))))
 
   const trials = deduped.filter((s) => s.isTrial)
   const subscriptions = deduped.filter((s) => !s.isTrial)
 
-  // Persist to Supabase
+  // ─── Persist to Supabase ─────────────────────────────────────────────────
   const userEmail = session.user!.email!
   console.log(`[scan] saving ${deduped.length} subscriptions to Supabase for ${userEmail}`)
 
@@ -339,29 +419,25 @@ ${email.bodyText}`
     else console.log(`[scan] inserted ${deduped.length} rows successfully`)
   }
 
-  // Reminders — only for future renewal dates
-  const todayStr = new Date().toISOString().split("T")[0]
-  const withDate = deduped.filter((s) => s.renewalDate)
+  // ─── Reminders — future dates only, skip cancelled ───────────────────────
+  const { error: delRemindErr } = await supabase.from("reminders").delete().eq("user_email", userEmail)
+  if (delRemindErr) console.error("[scan] supabase reminders delete error:", JSON.stringify(delRemindErr))
 
-  if (withDate.length > 0) {
-    const { error: delRemindErr } = await supabase.from("reminders").delete().eq("user_email", userEmail)
-    if (delRemindErr) console.error("[scan] supabase reminders delete error:", JSON.stringify(delRemindErr))
+  const reminderCandidates = deduped.filter((s) => s.renewalDate && s.status !== "cancelled")
+  const reminderRows = reminderCandidates.flatMap((sub) => {
+    const renewal = new Date(sub.renewalDate!)
+    const sevenDayStr = new Date(new Date(renewal).setDate(renewal.getDate() - 7)).toISOString().split("T")[0]
+    const oneDayStr = new Date(new Date(renewal).setDate(renewal.getDate() - 1)).toISOString().split("T")[0]
+    const rows = []
+    if (sevenDayStr >= todayStr) rows.push({ user_email: userEmail, service_name: sub.serviceName, renewal_date: sub.renewalDate, remind_at: sevenDayStr, sent: false })
+    if (oneDayStr >= todayStr) rows.push({ user_email: userEmail, service_name: sub.serviceName, renewal_date: sub.renewalDate, remind_at: oneDayStr, sent: false })
+    return rows
+  })
 
-    const reminderRows = withDate.flatMap((sub) => {
-      const renewal = new Date(sub.renewalDate!)
-      const sevenDayStr = new Date(new Date(renewal).setDate(renewal.getDate() - 7)).toISOString().split("T")[0]
-      const oneDayStr = new Date(new Date(renewal).setDate(renewal.getDate() - 1)).toISOString().split("T")[0]
-      const rows = []
-      if (sevenDayStr >= todayStr) rows.push({ user_email: userEmail, service_name: sub.serviceName, renewal_date: sub.renewalDate, remind_at: sevenDayStr, sent: false })
-      if (oneDayStr >= todayStr) rows.push({ user_email: userEmail, service_name: sub.serviceName, renewal_date: sub.renewalDate, remind_at: oneDayStr, sent: false })
-      return rows
-    })
-
-    if (reminderRows.length > 0) {
-      const { error: remindErr } = await supabase.from("reminders").insert(reminderRows)
-      if (remindErr) console.error("[scan] supabase reminders insert error:", JSON.stringify(remindErr))
-      else console.log(`[scan] created ${reminderRows.length} reminders`)
-    }
+  if (reminderRows.length > 0) {
+    const { error: remindErr } = await supabase.from("reminders").insert(reminderRows)
+    if (remindErr) console.error("[scan] supabase reminders insert error:", JSON.stringify(remindErr))
+    else console.log(`[scan] created ${reminderRows.length} reminders`)
   }
 
   return NextResponse.json({ subscriptions, trials, total: deduped.length })

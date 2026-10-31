@@ -9,12 +9,12 @@ type Subscription = {
   serviceName: string
   amount: number | null
   currency: string | null
-  billingCycle: "monthly" | "annual" | "unknown"
+  billingCycle: "monthly" | "yearly" | "weekly" | null
   renewalDate: string | null
   status: string
   isTrial: boolean
-  from: string
-  subject: string
+  from: string | null
+  subject: string | null
 }
 
 type ScanData = {
@@ -27,39 +27,55 @@ const SYM: Record<string, string> = {
   USD: "$", GBP: "£", EUR: "€", INR: "₹", CAD: "CA$", AUD: "A$", JPY: "¥",
 }
 
+// Fixed rates to GBP for total spend display
+const TO_GBP: Record<string, number> = {
+  GBP: 1,
+  USD: 0.79,
+  EUR: 0.85,
+  INR: 0.0095,
+  CAD: 0.58,
+  AUD: 0.51,
+  JPY: 0.0052,
+}
+
 const STATUS_COLOR: Record<string, string> = {
   active: "#22c55e",
   cancelled: "#ef4444",
   trial: "#e8ff47",
 }
 
-function extractRootDomain(from: string): string {
+function toGBP(amount: number, currency: string | null): number {
+  if (!currency) return amount
+  return amount * (TO_GBP[currency] ?? 1)
+}
+
+function extractRootDomain(from: string | null): string {
+  if (!from) return ""
   const host = from.match(/@([\w.-]+)/)?.[1] ?? ""
   const parts = host.split(".")
   return parts.length > 2 ? parts.slice(-2).join(".") : host
 }
 
-function currencyOf(subs: Subscription[]) {
-  const counts: Record<string, number> = {}
-  for (const s of subs) {
-    if (s.currency) counts[s.currency] = (counts[s.currency] ?? 0) + 1
-  }
-  const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null
-  return { sym: top ? (SYM[top] ?? top + " ") : "", mixed: new Set(Object.keys(counts)).size > 1 }
-}
-
 function calcSpend(subs: Subscription[]) {
-  const billable = subs.filter((s) => s.amount && s.status === "active")
-  const { sym, mixed } = currencyOf(billable)
-  const monthly = billable.reduce(
-    (acc, s) => acc + (s.billingCycle === "annual" ? s.amount! / 12 : s.amount!),
-    0
-  )
-  const annual = billable.reduce(
-    (acc, s) => acc + (s.billingCycle === "monthly" ? s.amount! * 12 : s.amount!),
-    0
-  )
-  return { sym, mixed, monthly, annual, any: billable.length > 0 }
+  // Exclude trials and cancelled from spend totals
+  const billable = subs.filter((s) => s.amount != null && s.status === "active" && !s.isTrial)
+  if (billable.length === 0) return { monthly: 0, annual: 0, any: false }
+
+  const monthly = billable.reduce((acc, s) => {
+    const gbp = toGBP(s.amount!, s.currency)
+    if (s.billingCycle === "yearly") return acc + gbp / 12
+    if (s.billingCycle === "weekly") return acc + gbp * 4.33
+    return acc + gbp
+  }, 0)
+
+  const annual = billable.reduce((acc, s) => {
+    const gbp = toGBP(s.amount!, s.currency)
+    if (s.billingCycle === "monthly") return acc + gbp * 12
+    if (s.billingCycle === "weekly") return acc + gbp * 52
+    return acc + gbp
+  }, 0)
+
+  return { monthly, annual, any: true }
 }
 
 // ─── Sidebar ────────────────────────────────────────────────────────────────
@@ -67,15 +83,12 @@ function calcSpend(subs: Subscription[]) {
 function Sidebar({ email }: { email?: string | null }) {
   return (
     <aside className="w-[220px] shrink-0 sticky top-0 h-screen flex flex-col border-r border-[#1c1c1e] bg-[#09090b]">
-      {/* Logo */}
       <div className="px-6 py-[22px] border-b border-[#1c1c1e]">
         <span className="font-space font-semibold text-[15px] tracking-tight text-[#fafafa]">Subtrakt</span>
       </div>
 
-      {/* Nav */}
       <nav className="flex-1 p-3 pt-4">
         <div className="flex items-center gap-2.5 px-3 py-[9px] rounded-lg bg-[#111113] text-[#fafafa] text-[13px] font-medium">
-          {/* Grid icon */}
           <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
             <rect x="0.5" y="0.5" width="5" height="5" rx="1" fill="currentColor" fillOpacity="0.6" />
             <rect x="7.5" y="0.5" width="5" height="5" rx="1" fill="currentColor" />
@@ -86,7 +99,6 @@ function Sidebar({ email }: { email?: string | null }) {
         </div>
       </nav>
 
-      {/* User / sign out */}
       <div className="p-3 border-t border-[#1c1c1e]">
         {email && (
           <div className="px-3 py-1 text-[11px] text-[#52525b] truncate mb-1">{email}</div>
@@ -150,10 +162,7 @@ function SubSection({
   return (
     <section className="mb-10">
       <div className="flex items-center gap-2 mb-3">
-        <span
-          className="w-[7px] h-[7px] rounded-full shrink-0"
-          style={{ background: dot }}
-        />
+        <span className="w-[7px] h-[7px] rounded-full shrink-0" style={{ background: dot }} />
         <h2 className="font-space font-medium text-[13px] text-[#fafafa]">{title}</h2>
         <span className="text-[12px] text-[#52525b] ml-0.5">{count}</span>
       </div>
@@ -167,7 +176,20 @@ function SubSection({
 function SubCard({ sub, leftColor }: { sub: Subscription; leftColor: string }) {
   const domain = extractRootDomain(sub.from)
   const sym = sub.currency ? (SYM[sub.currency] ?? sub.currency + " ") : ""
-  const cycleTag = sub.billingCycle === "monthly" ? "/mo" : sub.billingCycle === "annual" ? "/yr" : ""
+  const cycleTag =
+    sub.billingCycle === "monthly" ? "/mo" :
+    sub.billingCycle === "yearly" ? "/yr" :
+    sub.billingCycle === "weekly" ? "/wk" : ""
+
+  // Billing text: only show if billingCycle is known and non-null
+  const billingText = sub.billingCycle ? `Billed ${sub.billingCycle}` : null
+
+  // Renewal text: hide for cancelled subs
+  const renewalText = sub.status !== "cancelled" && sub.renewalDate
+    ? ` · Renews ${sub.renewalDate}`
+    : null
+
+  const subText = [billingText, renewalText].filter(Boolean).join("") || null
 
   return (
     <div
@@ -201,18 +223,15 @@ function SubCard({ sub, leftColor }: { sub: Subscription; leftColor: string }) {
           <div className="font-space font-medium text-[#fafafa] text-[14px] leading-none mb-1 truncate">
             {sub.serviceName}
           </div>
-          <div className="text-[11px] text-[#52525b] truncate">
-            {sub.billingCycle !== "unknown"
-              ? `Billed ${sub.billingCycle}`
-              : "Frequency unknown"}
-            {sub.renewalDate ? ` · Renews ${sub.renewalDate}` : ""}
-          </div>
+          {subText && (
+            <div className="text-[11px] text-[#52525b] truncate">{subText}</div>
+          )}
         </div>
       </div>
 
-      {/* Right: amount */}
+      {/* Right: amount in original currency */}
       <div className="shrink-0 text-right">
-        {sub.amount ? (
+        {sub.amount != null ? (
           <div className="font-space font-medium text-[14px] text-[#fafafa] leading-none">
             {sym}{sub.amount.toFixed(2)}
             <span className="text-[#52525b] text-[11px] font-normal">{cycleTag}</span>
@@ -252,7 +271,6 @@ export default function Dashboard() {
           setLoading(false)
           return
         }
-        // DB empty — auto-scan once (ref guards against React strict-mode double-fire)
         if (autoScanned.current) { setLoading(false); return }
         autoScanned.current = true
         setLoadingMsg("Scanning your inbox with Claude…")
@@ -270,27 +288,26 @@ export default function Dashboard() {
     setScanning(true)
     try {
       const d: Partial<ScanData> = await fetch("/api/scan").then((r) => r.json())
-      setData({
-        subscriptions: d.subscriptions ?? [],
-        trials: d.trials ?? [],
-        total: d.total ?? 0,
-      })
+      setData({ subscriptions: d.subscriptions ?? [], trials: d.trials ?? [], total: d.total ?? 0 })
     } finally {
       setScanning(false)
     }
   }
 
+  const todayStr = new Date().toISOString().split("T")[0]
   const { subscriptions, trials } = data
+
+  // Only show trials with a future (or unknown) end date
+  const futureTrials = trials.filter((s) => !s.renewalDate || s.renewalDate >= todayStr)
+
   const active = subscriptions.filter((s) => s.status === "active")
-  const cancelled = subscriptions.filter((s) => s.status !== "active")
+  const cancelled = subscriptions.filter((s) => s.status === "cancelled")
   const spend = calcSpend(active)
-  const pfx = spend.mixed ? "~" : ""
 
   return (
     <div className="flex min-h-screen bg-[#09090b] text-[#fafafa]">
       <Sidebar email={session?.user?.email} />
 
-      {/* Main */}
       <div className="flex-1 overflow-auto">
         {/* Page header */}
         <div className="px-10 pt-10 pb-8 border-b border-[#1c1c1e] flex items-start justify-between gap-4">
@@ -329,14 +346,14 @@ export default function Dashboard() {
                 <StatBlock value={String(data.total)} unit="found" label="subscriptions" />
                 <StatDivider />
                 <StatBlock
-                  value={spend.any ? `${pfx}${spend.sym}${spend.monthly.toFixed(2)}` : "—"}
+                  value={spend.any ? `£${spend.monthly.toFixed(2)}` : "—"}
                   unit="/month"
                   label="est. monthly spend"
                   noUnit={!spend.any}
                 />
                 <StatDivider />
                 <StatBlock
-                  value={spend.any ? `${pfx}${spend.sym}${spend.annual.toFixed(2)}` : "—"}
+                  value={spend.any ? `£${spend.annual.toFixed(2)}` : "—"}
                   unit="/year"
                   label="est. annual spend"
                   noUnit={!spend.any}
@@ -344,9 +361,9 @@ export default function Dashboard() {
               </div>
 
               {/* ── Trials ── */}
-              {trials.length > 0 && (
-                <SubSection title="Trials ending soon" count={trials.length} dot={STATUS_COLOR.trial}>
-                  {trials.map((s) => (
+              {futureTrials.length > 0 && (
+                <SubSection title="Trials ending soon" count={futureTrials.length} dot={STATUS_COLOR.trial}>
+                  {futureTrials.map((s) => (
                     <SubCard key={s.emailId} sub={s} leftColor={STATUS_COLOR.trial} />
                   ))}
                 </SubSection>
@@ -373,10 +390,7 @@ export default function Dashboard() {
               {/* ── Empty state ── */}
               {data.total === 0 && (
                 <div className="py-20 text-center">
-                  <div
-                    className="text-5xl mb-5 opacity-10 font-space font-semibold select-none"
-                    aria-hidden="true"
-                  >
+                  <div className="text-5xl mb-5 opacity-10 font-space font-semibold select-none" aria-hidden="true">
                     ◎
                   </div>
                   <p className="font-space font-medium text-[17px] text-[#fafafa] mb-1">
