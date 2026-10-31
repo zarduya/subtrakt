@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react"
 import { useSession, signOut } from "next-auth/react"
 import { useRouter } from "next/navigation"
 
+type OverrideAction = "not_subscription" | "free" | "edit_amount"
+
 type Subscription = {
   emailId: string
   serviceName: string
@@ -173,7 +175,37 @@ function SubSection({
 
 // ─── Subscription card ───────────────────────────────────────────────────────
 
-function SubCard({ sub, leftColor }: { sub: Subscription; leftColor: string }) {
+function SubCard({
+  sub,
+  leftColor,
+  onOverride,
+}: {
+  sub: Subscription
+  leftColor: string
+  onOverride: (action: OverrideAction, amount?: number) => void
+}) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [editVal, setEditVal] = useState(sub.amount != null ? sub.amount.toFixed(2) : "")
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!menuOpen) return
+    function handleClick(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClick)
+    return () => document.removeEventListener("mousedown", handleClick)
+  }, [menuOpen])
+
+  function submitEdit() {
+    const v = parseFloat(editVal)
+    if (!isNaN(v) && v >= 0) onOverride("edit_amount", v)
+    setEditing(false)
+  }
+
   const domain = extractRootDomain(sub.from)
   const sym = sub.currency ? (SYM[sub.currency] ?? sub.currency + " ") : ""
   const cycleTag =
@@ -181,14 +213,10 @@ function SubCard({ sub, leftColor }: { sub: Subscription; leftColor: string }) {
     sub.billingCycle === "yearly" ? "/yr" :
     sub.billingCycle === "weekly" ? "/wk" : ""
 
-  // Billing text: only show if billingCycle is known and non-null
   const billingText = sub.billingCycle ? `Billed ${sub.billingCycle}` : null
-
-  // Renewal text: hide for cancelled subs
   const renewalText = sub.status !== "cancelled" && sub.renewalDate
     ? ` · Renews ${sub.renewalDate}`
     : null
-
   const subText = [billingText, renewalText].filter(Boolean).join("") || null
 
   return (
@@ -229,16 +257,88 @@ function SubCard({ sub, leftColor }: { sub: Subscription; leftColor: string }) {
         </div>
       </div>
 
-      {/* Right: amount in original currency */}
-      <div className="shrink-0 text-right">
-        {sub.amount != null ? (
-          <div className="font-space font-medium text-[14px] text-[#fafafa] leading-none">
-            {sym}{sub.amount.toFixed(2)}
-            <span className="text-[#52525b] text-[11px] font-normal">{cycleTag}</span>
+      {/* Right: amount + options menu */}
+      <div className="shrink-0 flex items-center gap-2">
+        {editing ? (
+          <div className="flex items-center gap-1">
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              value={editVal}
+              onChange={(e) => setEditVal(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitEdit()
+                if (e.key === "Escape") setEditing(false)
+              }}
+              className="w-20 bg-[#1c1c1e] border border-[#3f3f46] rounded-md px-2 py-1 text-[13px] text-[#fafafa] font-space text-right outline-none focus:border-[#52525b]"
+              autoFocus
+            />
+            <button
+              onClick={submitEdit}
+              className="text-[#22c55e] hover:text-[#16a34a] text-[13px] px-1 transition-colors"
+              title="Confirm"
+            >
+              ✓
+            </button>
+            <button
+              onClick={() => setEditing(false)}
+              className="text-[#52525b] hover:text-[#71717a] text-[13px] px-1 transition-colors"
+              title="Cancel"
+            >
+              ✕
+            </button>
           </div>
         ) : (
-          <div className="text-[11px] text-[#52525b]">—</div>
+          <div className="text-right">
+            {sub.amount != null ? (
+              <div className="font-space font-medium text-[14px] text-[#fafafa] leading-none">
+                {sym}{sub.amount.toFixed(2)}
+                <span className="text-[#52525b] text-[11px] font-normal">{cycleTag}</span>
+              </div>
+            ) : (
+              <div className="text-[11px] text-[#52525b]">—</div>
+            )}
+          </div>
         )}
+
+        <div className="relative" ref={menuRef}>
+          <button
+            onClick={() => setMenuOpen((o) => !o)}
+            className="w-6 h-6 flex items-center justify-center rounded text-[#3f3f46] hover:text-[#71717a] hover:bg-[#1c1c1e] transition-colors duration-150"
+            title="Options"
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <circle cx="2" cy="6" r="1.25" fill="currentColor" />
+              <circle cx="6" cy="6" r="1.25" fill="currentColor" />
+              <circle cx="10" cy="6" r="1.25" fill="currentColor" />
+            </svg>
+          </button>
+
+          {menuOpen && (
+            <div className="absolute right-0 top-full mt-1.5 w-48 bg-[#18181b] border border-[#27272a] rounded-lg shadow-xl z-50 py-1">
+              <button
+                onClick={() => { setMenuOpen(false); onOverride("not_subscription") }}
+                className="w-full text-left px-3.5 py-2 text-[12.5px] text-[#a1a1aa] hover:text-[#fafafa] hover:bg-[#27272a] transition-colors"
+              >
+                Not a subscription
+              </button>
+              <button
+                onClick={() => { setMenuOpen(false); onOverride("free") }}
+                className="w-full text-left px-3.5 py-2 text-[12.5px] text-[#a1a1aa] hover:text-[#fafafa] hover:bg-[#27272a] transition-colors"
+              >
+                I don&apos;t pay for this
+              </button>
+              <div className="border-t border-[#27272a] my-1" />
+              <button
+                onClick={() => { setMenuOpen(false); setEditing(true) }}
+                className="w-full text-left px-3.5 py-2 text-[12.5px] text-[#a1a1aa] hover:text-[#fafafa] hover:bg-[#27272a] transition-colors"
+              >
+                Edit amount
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -291,6 +391,29 @@ export default function Dashboard() {
       setData({ subscriptions: d.subscriptions ?? [], trials: d.trials ?? [], total: d.total ?? 0 })
     } finally {
       setScanning(false)
+    }
+  }
+
+  async function applyOverride(serviceName: string, action: OverrideAction, customAmount?: number) {
+    fetch("/api/overrides", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ service_name: serviceName, action, custom_amount: customAmount ?? null }),
+    }).catch(console.error)
+
+    if (action === "not_subscription" || action === "free") {
+      setData((prev) => {
+        const filter = (arr: Subscription[]) => arr.filter((s) => s.serviceName !== serviceName)
+        const next = { ...prev, subscriptions: filter(prev.subscriptions), trials: filter(prev.trials) }
+        next.total = next.subscriptions.length + next.trials.length
+        return next
+      })
+    } else if (action === "edit_amount" && customAmount !== undefined) {
+      setData((prev) => {
+        const update = (arr: Subscription[]) =>
+          arr.map((s) => (s.serviceName === serviceName ? { ...s, amount: customAmount } : s))
+        return { ...prev, subscriptions: update(prev.subscriptions), trials: update(prev.trials) }
+      })
     }
   }
 
@@ -364,7 +487,12 @@ export default function Dashboard() {
               {futureTrials.length > 0 && (
                 <SubSection title="Trials ending soon" count={futureTrials.length} dot={STATUS_COLOR.trial}>
                   {futureTrials.map((s) => (
-                    <SubCard key={s.emailId} sub={s} leftColor={STATUS_COLOR.trial} />
+                    <SubCard
+                      key={s.emailId}
+                      sub={s}
+                      leftColor={STATUS_COLOR.trial}
+                      onOverride={(action, amount) => applyOverride(s.serviceName, action, amount)}
+                    />
                   ))}
                 </SubSection>
               )}
@@ -373,7 +501,12 @@ export default function Dashboard() {
               {active.length > 0 && (
                 <SubSection title="Active" count={active.length} dot={STATUS_COLOR.active}>
                   {active.map((s) => (
-                    <SubCard key={s.emailId} sub={s} leftColor={STATUS_COLOR.active} />
+                    <SubCard
+                      key={s.emailId}
+                      sub={s}
+                      leftColor={STATUS_COLOR.active}
+                      onOverride={(action, amount) => applyOverride(s.serviceName, action, amount)}
+                    />
                   ))}
                 </SubSection>
               )}
@@ -382,7 +515,12 @@ export default function Dashboard() {
               {cancelled.length > 0 && (
                 <SubSection title="Cancelled" count={cancelled.length} dot={STATUS_COLOR.cancelled}>
                   {cancelled.map((s) => (
-                    <SubCard key={s.emailId} sub={s} leftColor={STATUS_COLOR.cancelled} />
+                    <SubCard
+                      key={s.emailId}
+                      sub={s}
+                      leftColor={STATUS_COLOR.cancelled}
+                      onOverride={(action, amount) => applyOverride(s.serviceName, action, amount)}
+                    />
                   ))}
                 </SubSection>
               )}

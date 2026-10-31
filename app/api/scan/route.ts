@@ -11,11 +11,10 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! })
 const SYSTEM_PROMPT = `You extract subscription information from email content.
 
 Rules:
-- Mark isSubscription: true for ANY recurring digital service (streaming, SaaS, cloud storage, gaming subscriptions, VPN, news/media, hosting, etc.)
-- Mark isSubscription: false ONLY for: login codes/OTPs, password resets, package delivery/shipping, one-time purchases with no recurring billing
+- isSubscription: true ONLY if the email explicitly confirms a RECURRING service — it must mention a recurring plan, auto-renewal, next billing date, membership, or "subscribe & save". A plain order confirmation or purchase receipt for physical goods or a one-time digital purchase (e.g. a protein supplement order, an Amazon product order, a one-off app purchase) is NOT a subscription — return isSubscription: false. When in doubt, return isSubscription: false.
 - Normalize serviceName to brand only: "Udemy Personal Plan" → "Udemy", "Google One 100GB" → "Google One", "Netflix Standard with Ads" → "Netflix"
 - status: "active" if charged/renewed/active subscription, "cancelled" if cancellation confirmed, "trial" if in a free trial, "unknown" if unclear
-- amount: extract the numeric amount only (no currency symbol), null if not mentioned
+- amount: the FINAL TOTAL charged including all VAT and taxes — never the pre-tax subtotal. If both a subtotal and a grand total appear in the email, always use the larger total figure. Extract the numeric value only (no currency symbol), null if not mentioned.
 - currency: ISO 4217 code (USD, GBP, EUR, INR, etc.) or null if not mentioned
 - billingCycle: "monthly", "yearly", "weekly", or null if not determinable
 - renewalDate: "YYYY-MM-DD" or null — resolve relative dates like "renews in 7 days" using the receivedDate provided
@@ -419,11 +418,30 @@ ${email.bodyText}`
     else console.log(`[scan] inserted ${deduped.length} rows successfully`)
   }
 
-  // ─── Reminders — future dates only, skip cancelled ───────────────────────
+  // ─── Fetch overrides to exclude hidden services from reminders and response ──
+  const { data: overridesData } = await supabase
+    .from("user_overrides")
+    .select("service_name, action, custom_amount")
+    .eq("user_email", userEmail)
+
+  const hiddenServiceNames = new Set<string>(
+    (overridesData ?? [])
+      .filter((o: { action: string }) => o.action === "not_subscription" || o.action === "free")
+      .map((o: { service_name: string }) => o.service_name)
+  )
+  const amountOverrideMap = new Map<string, number>(
+    (overridesData ?? [])
+      .filter((o: { action: string; custom_amount: number | null }) => o.action === "edit_amount" && o.custom_amount != null)
+      .map((o: { service_name: string; custom_amount: number }) => [o.service_name, o.custom_amount])
+  )
+
+  // ─── Reminders — future dates only, skip cancelled and hidden ────────────
   const { error: delRemindErr } = await supabase.from("reminders").delete().eq("user_email", userEmail)
   if (delRemindErr) console.error("[scan] supabase reminders delete error:", JSON.stringify(delRemindErr))
 
-  const reminderCandidates = deduped.filter((s) => s.renewalDate && s.status !== "cancelled")
+  const reminderCandidates = deduped.filter(
+    (s) => s.renewalDate && s.status !== "cancelled" && !hiddenServiceNames.has(s.serviceName!)
+  )
   const reminderRows = reminderCandidates.flatMap((sub) => {
     const renewal = new Date(sub.renewalDate!)
     const sevenDayStr = new Date(new Date(renewal).setDate(renewal.getDate() - 7)).toISOString().split("T")[0]
@@ -440,5 +458,20 @@ ${email.bodyText}`
     else console.log(`[scan] created ${reminderRows.length} reminders`)
   }
 
-  return NextResponse.json({ subscriptions, trials, total: deduped.length })
+  const applyOverrides = (subs: ParsedSub[]) =>
+    subs
+      .filter((s) => !hiddenServiceNames.has(s.serviceName!))
+      .map((s) => ({
+        ...s,
+        amount: amountOverrideMap.has(s.serviceName!) ? amountOverrideMap.get(s.serviceName!)! : s.amount,
+      }))
+
+  const filteredSubscriptions = applyOverrides(subscriptions)
+  const filteredTrials = applyOverrides(trials)
+
+  return NextResponse.json({
+    subscriptions: filteredSubscriptions,
+    trials: filteredTrials,
+    total: filteredSubscriptions.length + filteredTrials.length,
+  })
 }

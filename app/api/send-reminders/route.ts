@@ -106,12 +106,30 @@ export async function GET() {
     return NextResponse.json({ sent: 0 })
   }
 
-  console.log(`[send-reminders] processing ${reminders.length} reminders`)
+  // Filter out reminders for services the user has hidden
+  const userEmails = [...new Set(reminders.map((r: { user_email: string }) => r.user_email))]
+  const { data: allOverrides } = await supabase
+    .from("user_overrides")
+    .select("user_email, service_name, action")
+    .in("user_email", userEmails)
+    .in("action", ["not_subscription", "free"])
+
+  const hiddenSet = new Set<string>(
+    (allOverrides ?? []).map(
+      (o: { user_email: string; service_name: string }) => `${o.user_email}:${o.service_name}`
+    )
+  )
+
+  const activeReminders = reminders.filter(
+    (r: { user_email: string; service_name: string }) => !hiddenSet.has(`${r.user_email}:${r.service_name}`)
+  )
+
+  console.log(`[send-reminders] processing ${activeReminders.length} of ${reminders.length} reminders (${reminders.length - activeReminders.length} hidden)`)
 
   let sent = 0
   const errors: string[] = []
 
-  for (const reminder of reminders) {
+  for (const reminder of activeReminders) {
     const daysUntil = Math.ceil(
       (new Date(reminder.renewal_date + "T12:00:00Z").getTime() - Date.now()) / 86_400_000
     )
@@ -148,5 +166,5 @@ export async function GET() {
     }
   }
 
-  return NextResponse.json({ sent, total: reminders.length, ...(errors.length ? { errors } : {}) })
+  return NextResponse.json({ sent, total: activeReminders.length, ...(errors.length ? { errors } : {}) })
 }
