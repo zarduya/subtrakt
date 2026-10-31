@@ -2,6 +2,7 @@ import { getServerSession } from "next-auth/next"
 import { authOptions } from "../auth/options"
 import { NextResponse } from "next/server"
 import { supabase } from "@/lib/supabase"
+import { normalizeName } from "@/lib/normalize"
 
 export async function GET() {
   const session = await getServerSession(authOptions)
@@ -31,10 +32,14 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Missing service_name or action" }, { status: 400 })
   }
 
+  // Store the normalised service name so overrides survive rescans where Claude
+  // returns slightly different capitalisation or spacing.
+  const normalizedName = normalizeName(service_name)
+
   const { error } = await supabase.from("user_overrides").upsert(
     {
       user_email: session.user.email,
-      service_name,
+      service_name: normalizedName,
       action,
       custom_amount: custom_amount ?? null,
     },

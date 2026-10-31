@@ -416,19 +416,34 @@ ${email.bodyText}`
       if (!trialEndDate && s.trialEndDate) trialEndDate = s.trialEndDate
     }
 
-    // Fill missing renewal date from lastChargeDate + billingCycle
-    if (!renewalDate && lastChargeDate && billingCycle) {
-      renewalDate = rollDateForward(lastChargeDate, billingCycle)
+    // Determine lapsed status BEFORE rolling renewal dates — don't project a future
+    // renewal date for a service that hasn't charged recently.
+    const rawStatus = newest.status
+    let determinedLapsed = false
+    if (rawStatus === "active" && lastChargeDate && billingCycle) {
+      const daysSince = Math.floor(
+        (todayMs - new Date(lastChargeDate + "T00:00:00Z").getTime()) / 86_400_000
+      )
+      determinedLapsed =
+        (billingCycle === "monthly" && daysSince > 45) ||
+        (billingCycle === "yearly" && daysSince > 395) ||
+        (billingCycle === "weekly" && daysSince > 14)
+      if (determinedLapsed)
+        console.log(`[scan] lapsed: "${displayName}" lastCharge=${lastChargeDate} ${daysSince}d ago cycle=${billingCycle}`)
     }
-    // For trials, fall back to trialEndDate
-    if (!renewalDate && newest.isTrial && trialEndDate) renewalDate = trialEndDate
 
-    // Fix past renewal dates
-    renewalDate = fixRenewalDate(renewalDate, billingCycle)
+    const status = determinedLapsed ? "lapsed" : rawStatus
 
-    // Cancelled: no renewal date
-    const status = newest.status
-    if (status === "cancelled") renewalDate = null
+    // Only roll renewal dates for non-lapsed, non-cancelled subscriptions.
+    if (!determinedLapsed && status !== "cancelled") {
+      if (!renewalDate && lastChargeDate && billingCycle) {
+        renewalDate = rollDateForward(lastChargeDate, billingCycle)
+      }
+      if (!renewalDate && newest.isTrial && trialEndDate) renewalDate = trialEndDate
+      renewalDate = fixRenewalDate(renewalDate, billingCycle)
+    } else {
+      renewalDate = null
+    }
 
     rawDeduped.push({
       ...newest,
@@ -443,7 +458,7 @@ ${email.bodyText}`
     })
   }
 
-  // ─── Handle past trials + lapsed detection ───────────────────────────────
+  // ─── Handle past trials (lapsed already detected above for non-trial subs) ──
   const deduped: ParsedSub[] = []
   for (const sub of rawDeduped) {
     if (sub.isTrial && sub.trialEndDate && sub.trialEndDate < todayStr) {
@@ -451,13 +466,18 @@ ${email.bodyText}`
       const hasEvidence = hasLaterCharge || !!sub.billingCycle
       if (hasEvidence) {
         const base = sub.lastChargeDate ?? sub.trialEndDate!
-        const renewal = sub.billingCycle ? rollDateForward(base, sub.billingCycle) : null
-        const promoted = { ...sub, isTrial: false, status: "active", renewalDate: renewal }
-        deduped.push(markLapsedIfStale(promoted, todayMs))
+        // Check lapsed BEFORE rolling the renewal date for promoted trials.
+        const promoted = { ...sub, isTrial: false, status: "active", renewalDate: null }
+        const checked = markLapsedIfStale(promoted, todayMs)
+        const renewal =
+          checked.status !== "lapsed" && sub.billingCycle
+            ? rollDateForward(base, sub.billingCycle)
+            : null
+        deduped.push({ ...checked, renewalDate: renewal })
       }
       // else: drop the expired trial entirely
     } else {
-      deduped.push(markLapsedIfStale(sub, todayMs))
+      deduped.push(sub)
     }
   }
 
@@ -515,12 +535,9 @@ ${email.bodyText}`
       else console.log(`[scan] inserted ${deduped.length} rows, deleted old scan rows`)
     }
   } else {
-    // Scan found nothing — wipe existing rows
-    const { error: deleteErr } = await supabase
-      .from("subscriptions")
-      .delete()
-      .eq("user_email", userEmail)
-    if (deleteErr) console.error("[scan] supabase delete error:", JSON.stringify(deleteErr))
+    // Scan found nothing — keep existing rows to avoid a blank dashboard.
+    // They will be replaced when the next scan finds subscriptions.
+    console.log("[scan] scan found 0 subscriptions — existing rows preserved")
   }
 
   // ─── Fetch overrides (matched on normalised name) ─────────────────────────

@@ -68,10 +68,12 @@ const SERVICE_DOMAIN_OVERRIDES: Record<string, string> = {
   "youtube music": "youtube.com",
   "google play": "play.google.com",
   "new york times": "nytimes.com",
+  "new york times digital": "nytimes.com",
   "nyt": "nytimes.com",
+  "nytimes": "nytimes.com",
 }
 
-const STRIP_FOR_DOMAIN_RE = /\b(vpn|pro|plus|premium|basic|standard|individual|family|personal|plan|subscription|membership|app)\b/gi
+const STRIP_FOR_DOMAIN_RE = /\b(vpn|pro|plus|premium|basic|standard|individual|family|personal|plan|subscription|membership|app|digital|news)\b/gi
 
 function serviceNameToDomain(serviceName: string): string {
   const normalized = serviceName
@@ -162,7 +164,7 @@ function StatBlock({
   noUnit?: boolean
 }) {
   return (
-    <div className="flex flex-col gap-1 sm:px-10 sm:first:pl-0">
+    <div className="flex flex-col gap-1">
       <div className="flex items-baseline gap-1.5 leading-none">
         <span className="font-space font-semibold text-[3.75rem] tracking-tight text-[#fafafa] tabular-nums leading-none">
           {value}
@@ -174,10 +176,6 @@ function StatBlock({
       <div className="text-[10px] uppercase tracking-[0.1em] text-[#52525b]">{label}</div>
     </div>
   )
-}
-
-function StatDivider() {
-  return <div className="hidden sm:block w-px h-12 bg-[#1c1c1e] self-center shrink-0" />
 }
 
 // ─── Section wrapper ─────────────────────────────────────────────────────────
@@ -446,12 +444,8 @@ export default function Dashboard() {
   }
 
   async function applyOverride(serviceName: string, action: OverrideAction, customAmount?: number) {
-    fetch("/api/overrides", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ service_name: serviceName, action, custom_amount: customAmount ?? null }),
-    }).catch(console.error)
-
+    // Apply locally first for instant feedback, then persist to the server.
+    // Awaiting the save ensures the override is committed before any subsequent rescan.
     if (action === "not_subscription" || action === "free") {
       setData((prev) => {
         const filter = (arr: Subscription[]) => arr.filter((s) => s.serviceName !== serviceName)
@@ -466,6 +460,11 @@ export default function Dashboard() {
         return { ...prev, subscriptions: update(prev.subscriptions), trials: update(prev.trials) }
       })
     }
+    await fetch("/api/overrides", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ service_name: serviceName, action, custom_amount: customAmount ?? null }),
+    }).catch(console.error)
   }
 
   const todayStr = new Date().toISOString().split("T")[0]
@@ -509,30 +508,34 @@ export default function Dashboard() {
         </div>
 
         <div className="px-10 py-10 max-w-4xl">
-          {status === "loading" || loading ? (
+          {status === "loading" || loading || (scanning && data.total === 0) ? (
             <div className="flex items-center gap-3 text-[#71717a] py-4">
               <div className="w-4 h-4 border border-[#71717a] border-t-[#fafafa] rounded-full animate-spin" />
-              <span className="text-[13px]">{loadingMsg}</span>
+              <span className="text-[13px]">{scanning ? "Scanning your inbox with Claude…" : loadingMsg}</span>
             </div>
           ) : (
             <>
-              {/* ── Stats ── */}
-              <div className="flex flex-col sm:flex-row sm:items-start sm:flex-wrap gap-y-8 sm:gap-y-0 mb-14 border-b border-[#1c1c1e] pb-12">
-                <StatBlock value={String(data.total)} unit="found" label="subscriptions" />
-                <StatDivider />
-                <StatBlock
-                  value={spend.any ? `£${spend.monthly.toFixed(2)}` : "—"}
-                  unit="/month"
-                  label="est. monthly spend"
-                  noUnit={!spend.any}
-                />
-                <StatDivider />
-                <StatBlock
-                  value={spend.any ? `£${spend.annual.toFixed(2)}` : "—"}
-                  unit="/year"
-                  label="est. annual spend"
-                  noUnit={!spend.any}
-                />
+              {/* ── Stats: 1-col on mobile, 3-col on desktop ── */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 mb-14 border-b border-[#1c1c1e] pb-12">
+                <div className="pb-8 sm:pb-0 sm:pr-10 border-b sm:border-b-0 border-[#1c1c1e]">
+                  <StatBlock value={String(data.total)} unit="found" label="subscriptions" />
+                </div>
+                <div className="py-8 sm:py-0 sm:px-10 border-b sm:border-b-0 sm:border-l sm:border-r border-[#1c1c1e]">
+                  <StatBlock
+                    value={spend.any ? `£${spend.monthly.toFixed(2)}` : "—"}
+                    unit="/month"
+                    label="est. monthly spend"
+                    noUnit={!spend.any}
+                  />
+                </div>
+                <div className="pt-8 sm:pt-0 sm:pl-10">
+                  <StatBlock
+                    value={spend.any ? `£${spend.annual.toFixed(2)}` : "—"}
+                    unit="/year"
+                    label="est. annual spend"
+                    noUnit={!spend.any}
+                  />
+                </div>
               </div>
 
               {/* ── Trials ── */}
