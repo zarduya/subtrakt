@@ -3,6 +3,7 @@ import { authOptions } from "../auth/options"
 import { NextResponse } from "next/server"
 import Anthropic from "@anthropic-ai/sdk"
 import { supabase } from "@/lib/supabase"
+import { normalizeName, ALIAS_MAP } from "@/lib/normalize"
 
 export const maxDuration = 60
 
@@ -25,33 +26,10 @@ Rules:
 Reply with ONLY valid JSON, no markdown fences, no explanation:
 {"isSubscription":true,"serviceName":"...","status":"active","amount":null,"currency":null,"billingCycle":null,"renewalDate":null,"lastChargeDate":null,"isTrial":false,"trialEndDate":null}`
 
-// ─── Alias map: normalized name → canonical group key ────────────────────────
-// Explicit remaps applied after all stripping: normalized key → canonical key
-const ALIAS_MAP: Record<string, string> = {
-  "anthropic": "claude",
-  "anthropic claude": "claude",
-}
-
-// Strip "the / a / an" only at the very start of the name
-const STRIP_LEADING_ARTICLE_RE = /^(the|an?)\s+/i
-// Strip plan-tier and descriptor words (extended list)
-const STRIP_PLAN_WORDS_RE =
-  /\b(ai|vpn|pro|plus|premium|basic|standard|individual|family|personal|plan|subscription|membership|app)\b/gi
-const STRIP_PUNCT_RE = /[^\w\s]/g
-
-function normalizeName(name: string): string {
-  const n = name
-    .toLowerCase()
-    .replace(STRIP_PUNCT_RE, " ")
-    .replace(STRIP_LEADING_ARTICLE_RE, "")
-    .replace(STRIP_PLAN_WORDS_RE, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-  return ALIAS_MAP[n] ?? n
-}
-
-// Marketplace / payment-processor domains that send billing emails on behalf of
-// other services — grouping by these domains would merge unrelated services.
+// ─── Marketplace / payment-processor domains ──────────────────────────────────
+// These send billing emails on behalf of many different services. Never use them
+// as a grouping key — doing so merges unrelated subscriptions (e.g. AppleCare+
+// and Surfshark VPN both arrive from apple.com).
 const MARKETPLACE_DOMAINS = new Set([
   "apple.com",
   "google.com",
@@ -215,6 +193,26 @@ function fixRenewalDate(renewalDate: string | null | undefined, billingCycle: st
   return rollDateForward(renewalDate, billingCycle) // returns null if billingCycle unknown
 }
 
+// ─── Lapsed detection ─────────────────────────────────────────────────────────
+// Mark active subscriptions as "lapsed" when the last charge is older than one
+// billing cycle + a grace window (45d monthly, 13 months yearly, 14d weekly).
+
+function markLapsedIfStale(sub: ParsedSub, todayMs: number): ParsedSub {
+  if (sub.status !== "active" || !sub.lastChargeDate || !sub.billingCycle) return sub
+  const daysSince = Math.floor(
+    (todayMs - new Date(sub.lastChargeDate + "T00:00:00Z").getTime()) / 86_400_000
+  )
+  const isLapsed =
+    (sub.billingCycle === "monthly" && daysSince > 45) ||
+    (sub.billingCycle === "yearly" && daysSince > 395) ||
+    (sub.billingCycle === "weekly" && daysSince > 14)
+  if (!isLapsed) return sub
+  console.log(
+    `[scan] lapsed: "${sub.serviceName}" lastCharge=${sub.lastChargeDate} ${daysSince}d ago cycle=${sub.billingCycle}`
+  )
+  return { ...sub, status: "lapsed" }
+}
+
 // ─── Batch helper ─────────────────────────────────────────────────────────────
 
 async function processInBatches<T, R>(items: T[], batchSize: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -331,8 +329,6 @@ ${email.bodyText}`
   const allSubs = results.filter((s) => s.isSubscription)
 
   // ─── Deduplicate by normalized name; use sender domain only for non-marketplace senders ──
-  // Marketplace domains (Apple App Store, Google Play, PayPal, Stripe, Amazon) send billing
-  // emails for many different services — grouping by their domain would merge unrelated services.
   const nameKeyToCanonical = new Map<string, string>()
   const domainToCanonical = new Map<string, string>()
   const groups = new Map<string, ParsedSub[]>()
@@ -346,7 +342,6 @@ ${email.bodyText}`
     const canonical =
       ALIAS_MAP[nameKey] ??
       nameKeyToCanonical.get(nameKey) ??
-      // Skip domain-based grouping for marketplace senders — they host multiple services
       (!isMarketplace && domain ? domainToCanonical.get(domain) : undefined) ??
       nameKey
 
@@ -369,7 +364,6 @@ ${email.bodyText}`
   // ─── Containment merge: absorb groups whose key is a word-supersequence of a ─
   // shorter key — e.g. "new york times digital" absorbed into "new york times".
   // Only compares service-name keys, never sender domains.
-  // Requires the shorter key to have ≥ 2 words to avoid false single-word merges.
   {
     const snapshot = Array.from(groups.keys())
     for (const shorter of snapshot) {
@@ -391,14 +385,14 @@ ${email.bodyText}`
   }
 
   const todayStr = todayUTC().toISOString().split("T")[0]
+  const todayMs = todayUTC().getTime()
 
   const rawDeduped: ParsedSub[] = []
   for (const [, group] of groups) {
     group.sort((a, b) => parseInt(b.internalDate || "0") - parseInt(a.internalDate || "0"))
     const newest = group[0]
 
-    // Pick the display name with the most words (most complete/official looking);
-    // fall back to the most recent email's name on ties.
+    // Pick the display name with the most words (most complete/official looking)
     const displayName = group.reduce((best, s) => {
       const bw = best.split(" ").length
       const sw = (s.serviceName ?? "").split(" ").length
@@ -449,21 +443,21 @@ ${email.bodyText}`
     })
   }
 
-  // ─── Handle past trials ──────────────────────────────────────────────────
+  // ─── Handle past trials + lapsed detection ───────────────────────────────
   const deduped: ParsedSub[] = []
   for (const sub of rawDeduped) {
     if (sub.isTrial && sub.trialEndDate && sub.trialEndDate < todayStr) {
       const hasLaterCharge = !!(sub.lastChargeDate && sub.lastChargeDate > sub.trialEndDate!)
       const hasEvidence = hasLaterCharge || !!sub.billingCycle
       if (hasEvidence) {
-        // Promote to active subscription
         const base = sub.lastChargeDate ?? sub.trialEndDate!
         const renewal = sub.billingCycle ? rollDateForward(base, sub.billingCycle) : null
-        deduped.push({ ...sub, isTrial: false, status: "active", renewalDate: renewal })
+        const promoted = { ...sub, isTrial: false, status: "active", renewalDate: renewal }
+        deduped.push(markLapsedIfStale(promoted, todayMs))
       }
       // else: drop the expired trial entirely
     } else {
-      deduped.push(sub)
+      deduped.push(markLapsedIfStale(sub, todayMs))
     }
   }
 
@@ -484,12 +478,13 @@ ${email.bodyText}`
   const trials = deduped.filter((s) => s.isTrial)
   const subscriptions = deduped.filter((s) => !s.isTrial)
 
-  // ─── Persist to Supabase ─────────────────────────────────────────────────
+  // ─── Persist to Supabase (atomic swap: insert first, delete old after) ────
+  // Keeping old rows visible during the scan prevents a blank dashboard if the
+  // user reloads while a rescan is in progress.
   const userEmail = session.user!.email!
   console.log(`[scan] saving ${deduped.length} subscriptions to Supabase for ${userEmail}`)
 
-  const { error: deleteErr } = await supabase.from("subscriptions").delete().eq("user_email", userEmail)
-  if (deleteErr) console.error("[scan] supabase delete error:", JSON.stringify(deleteErr))
+  const scannedAt = new Date().toISOString()
 
   if (deduped.length > 0) {
     const { error: insertErr } = await supabase.from("subscriptions").insert(
@@ -504,35 +499,57 @@ ${email.bodyText}`
         from_email: sub.from,
         subject: sub.subject,
         is_trial: sub.isTrial ?? false,
+        scanned_at: scannedAt,
       }))
     )
-    if (insertErr) console.error("[scan] supabase insert error:", JSON.stringify(insertErr))
-    else console.log(`[scan] inserted ${deduped.length} rows successfully`)
+    if (insertErr) {
+      console.error("[scan] supabase insert error:", JSON.stringify(insertErr))
+    } else {
+      // Delete previous scan's rows only after the new ones are safely inserted
+      const { error: deleteErr } = await supabase
+        .from("subscriptions")
+        .delete()
+        .eq("user_email", userEmail)
+        .lt("scanned_at", scannedAt)
+      if (deleteErr) console.error("[scan] supabase delete old rows error:", JSON.stringify(deleteErr))
+      else console.log(`[scan] inserted ${deduped.length} rows, deleted old scan rows`)
+    }
+  } else {
+    // Scan found nothing — wipe existing rows
+    const { error: deleteErr } = await supabase
+      .from("subscriptions")
+      .delete()
+      .eq("user_email", userEmail)
+    if (deleteErr) console.error("[scan] supabase delete error:", JSON.stringify(deleteErr))
   }
 
-  // ─── Fetch overrides to exclude hidden services from reminders and response ──
+  // ─── Fetch overrides (matched on normalised name) ─────────────────────────
   const { data: overridesData } = await supabase
     .from("user_overrides")
     .select("service_name, action, custom_amount")
     .eq("user_email", userEmail)
 
-  const hiddenServiceNames = new Set<string>(
+  const hiddenNormNames = new Set<string>(
     (overridesData ?? [])
       .filter((o: { action: string }) => o.action === "not_subscription" || o.action === "free")
-      .map((o: { service_name: string }) => o.service_name)
+      .map((o: { service_name: string }) => normalizeName(o.service_name))
   )
   const amountOverrideMap = new Map<string, number>(
     (overridesData ?? [])
       .filter((o: { action: string; custom_amount: number | null }) => o.action === "edit_amount" && o.custom_amount != null)
-      .map((o: { service_name: string; custom_amount: number }) => [o.service_name, o.custom_amount])
+      .map((o: { service_name: string; custom_amount: number }) => [normalizeName(o.service_name), o.custom_amount])
   )
 
-  // ─── Reminders — future dates only, skip cancelled and hidden ────────────
+  // ─── Reminders — future dates only, skip cancelled/lapsed/hidden ─────────
   const { error: delRemindErr } = await supabase.from("reminders").delete().eq("user_email", userEmail)
   if (delRemindErr) console.error("[scan] supabase reminders delete error:", JSON.stringify(delRemindErr))
 
   const reminderCandidates = deduped.filter(
-    (s) => s.renewalDate && s.status !== "cancelled" && !hiddenServiceNames.has(s.serviceName!)
+    (s) =>
+      s.renewalDate &&
+      s.status !== "cancelled" &&
+      s.status !== "lapsed" &&
+      !hiddenNormNames.has(normalizeName(s.serviceName!))
   )
   const reminderRows = reminderCandidates.flatMap((sub) => {
     const renewal = new Date(sub.renewalDate!)
@@ -552,11 +569,14 @@ ${email.bodyText}`
 
   const applyOverrides = (subs: ParsedSub[]) =>
     subs
-      .filter((s) => !hiddenServiceNames.has(s.serviceName!))
-      .map((s) => ({
-        ...s,
-        amount: amountOverrideMap.has(s.serviceName!) ? amountOverrideMap.get(s.serviceName!)! : s.amount,
-      }))
+      .filter((s) => !hiddenNormNames.has(normalizeName(s.serviceName!)))
+      .map((s) => {
+        const norm = normalizeName(s.serviceName!)
+        return {
+          ...s,
+          amount: amountOverrideMap.has(norm) ? amountOverrideMap.get(norm)! : s.amount,
+        }
+      })
 
   const filteredSubscriptions = applyOverrides(subscriptions)
   const filteredTrials = applyOverrides(trials)

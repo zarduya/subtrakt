@@ -44,6 +44,7 @@ const STATUS_COLOR: Record<string, string> = {
   active: "#22c55e",
   cancelled: "#ef4444",
   trial: "#e8ff47",
+  lapsed: "#52525b",
 }
 
 function toGBP(amount: number, currency: string | null): number {
@@ -66,6 +67,8 @@ const SERVICE_DOMAIN_OVERRIDES: Record<string, string> = {
   "youtube": "youtube.com",
   "youtube music": "youtube.com",
   "google play": "play.google.com",
+  "new york times": "nytimes.com",
+  "nyt": "nytimes.com",
 }
 
 const STRIP_FOR_DOMAIN_RE = /\b(vpn|pro|plus|premium|basic|standard|individual|family|personal|plan|subscription|membership|app)\b/gi
@@ -159,7 +162,7 @@ function StatBlock({
   noUnit?: boolean
 }) {
   return (
-    <div className="flex flex-col gap-1 px-10 first:pl-0">
+    <div className="flex flex-col gap-1 sm:px-10 sm:first:pl-0">
       <div className="flex items-baseline gap-1.5 leading-none">
         <span className="font-space font-semibold text-[3.75rem] tracking-tight text-[#fafafa] tabular-nums leading-none">
           {value}
@@ -174,7 +177,7 @@ function StatBlock({
 }
 
 function StatDivider() {
-  return <div className="w-px h-12 bg-[#1c1c1e] self-center shrink-0" />
+  return <div className="hidden sm:block w-px h-12 bg-[#1c1c1e] self-center shrink-0" />
 }
 
 // ─── Section wrapper ─────────────────────────────────────────────────────────
@@ -184,20 +187,39 @@ function SubSection({
   count,
   dot,
   children,
+  defaultCollapsed,
 }: {
   title: string
   count: number
   dot: string
   children: React.ReactNode
+  defaultCollapsed?: boolean
 }) {
+  const [open, setOpen] = useState(defaultCollapsed === undefined ? true : !defaultCollapsed)
+  const collapsible = defaultCollapsed !== undefined
+
   return (
     <section className="mb-10">
-      <div className="flex items-center gap-2 mb-3">
+      <div
+        role={collapsible ? "button" : undefined}
+        tabIndex={collapsible ? 0 : undefined}
+        className={`flex items-center gap-2 mb-3 ${collapsible ? "cursor-pointer select-none" : ""}`}
+        onClick={collapsible ? () => setOpen((o) => !o) : undefined}
+        onKeyDown={collapsible ? (e) => { if (e.key === "Enter" || e.key === " ") setOpen((o) => !o) } : undefined}
+      >
         <span className="w-[7px] h-[7px] rounded-full shrink-0" style={{ background: dot }} />
         <h2 className="font-space font-medium text-[13px] text-[#fafafa]">{title}</h2>
         <span className="text-[12px] text-[#52525b] ml-0.5">{count}</span>
+        {collapsible && (
+          <span
+            className={`ml-auto text-[#52525b] text-[11px] transition-transform duration-200 ${open ? "rotate-180" : ""}`}
+            aria-hidden="true"
+          >
+            ▾
+          </span>
+        )}
       </div>
-      <div className="flex flex-col gap-2">{children}</div>
+      {open && <div className="flex flex-col gap-2">{children}</div>}
     </section>
   )
 }
@@ -454,6 +476,7 @@ export default function Dashboard() {
 
   const active = subscriptions.filter((s) => s.status === "active")
   const cancelled = subscriptions.filter((s) => s.status === "cancelled")
+  const lapsed = subscriptions.filter((s) => s.status === "lapsed")
   const spend = calcSpend(active)
 
   return (
@@ -494,7 +517,7 @@ export default function Dashboard() {
           ) : (
             <>
               {/* ── Stats ── */}
-              <div className="flex items-start flex-wrap gap-y-8 mb-14 border-b border-[#1c1c1e] pb-12">
+              <div className="flex flex-col sm:flex-row sm:items-start sm:flex-wrap gap-y-8 sm:gap-y-0 mb-14 border-b border-[#1c1c1e] pb-12">
                 <StatBlock value={String(data.total)} unit="found" label="subscriptions" />
                 <StatDivider />
                 <StatBlock
@@ -554,8 +577,22 @@ export default function Dashboard() {
                 </SubSection>
               )}
 
-              {/* ── Empty state ── */}
-              {data.total === 0 && (
+              {/* ── Possibly inactive (lapsed) ── */}
+              {lapsed.length > 0 && (
+                <SubSection title="Possibly inactive" count={lapsed.length} dot={STATUS_COLOR.lapsed} defaultCollapsed={true}>
+                  {lapsed.map((s) => (
+                    <SubCard
+                      key={s.emailId}
+                      sub={s}
+                      leftColor={STATUS_COLOR.lapsed}
+                      onOverride={(action, amount) => applyOverride(s.serviceName, action, amount)}
+                    />
+                  ))}
+                </SubSection>
+              )}
+
+              {/* ── Empty state — hidden while a scan is running ── */}
+              {data.total === 0 && !scanning && (
                 <div className="py-20 text-center">
                   <div className="text-5xl mb-5 opacity-10 font-space font-semibold select-none" aria-hidden="true">
                     ◎
