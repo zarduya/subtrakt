@@ -51,11 +51,40 @@ function toGBP(amount: number, currency: string | null): number {
   return amount * (TO_GBP[currency] ?? 1)
 }
 
-function extractRootDomain(from: string | null): string {
-  if (!from) return ""
-  const host = from.match(/@([\w.-]+)/)?.[1] ?? ""
-  const parts = host.split(".")
-  return parts.length > 2 ? parts.slice(-2).join(".") : host
+// Service name → favicon domain. Covers services billed through marketplaces
+// (App Store, Google Play, etc.) where the sender domain is wrong.
+const SERVICE_DOMAIN_OVERRIDES: Record<string, string> = {
+  "applecare": "apple.com",
+  "apple tv": "apple.com",
+  "apple arcade": "apple.com",
+  "icloud": "icloud.com",
+  "claude": "claude.ai",
+  "anthropic": "anthropic.com",
+  "github copilot": "github.com",
+  "google one": "google.com",
+  "google workspace": "google.com",
+  "youtube": "youtube.com",
+  "youtube music": "youtube.com",
+  "google play": "play.google.com",
+}
+
+const STRIP_FOR_DOMAIN_RE = /\b(vpn|pro|plus|premium|basic|standard|individual|family|personal|plan|subscription|membership|app)\b/gi
+
+function serviceNameToDomain(serviceName: string): string {
+  const normalized = serviceName
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .replace(/^(the|an?)\s+/i, "")
+    .replace(STRIP_FOR_DOMAIN_RE, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+
+  if (SERVICE_DOMAIN_OVERRIDES[normalized]) return SERVICE_DOMAIN_OVERRIDES[normalized]
+
+  const firstWord = normalized.split(" ")[0]
+  if (firstWord && SERVICE_DOMAIN_OVERRIDES[firstWord]) return SERVICE_DOMAIN_OVERRIDES[firstWord]
+
+  return firstWord ? `${firstWord}.com` : ""
 }
 
 function calcSpend(subs: Subscription[]) {
@@ -206,7 +235,7 @@ function SubCard({
     setEditing(false)
   }
 
-  const domain = extractRootDomain(sub.from)
+  const domain = serviceNameToDomain(sub.serviceName)
   const sym = sub.currency ? (SYM[sub.currency] ?? sub.currency + " ") : ""
   const cycleTag =
     sub.billingCycle === "monthly" ? "/mo" :

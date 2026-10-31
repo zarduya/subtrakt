@@ -50,10 +50,27 @@ function normalizeName(name: string): string {
   return ALIAS_MAP[n] ?? n
 }
 
+// Marketplace / payment-processor domains that send billing emails on behalf of
+// other services — grouping by these domains would merge unrelated services.
+const MARKETPLACE_DOMAINS = new Set([
+  "apple.com",
+  "google.com",
+  "paypal.com",
+  "stripe.com",
+  "amazon.com",
+  "amazon.co.uk",
+])
+
 function senderDomain(from: string): string {
   const host = from.match(/@([\w.-]+)/)?.[1]?.toLowerCase() ?? ""
   const parts = host.split(".")
   if (parts.length < 2) return host
+  // Handle two-level ccTLDs like .co.uk, .com.au — take last 3 parts
+  const last = parts[parts.length - 1]
+  const secondLast = parts[parts.length - 2]
+  if (last.length === 2 && secondLast.length <= 3 && parts.length >= 3) {
+    return parts.slice(-3).join(".")
+  }
   return parts.slice(-2).join(".")
 }
 
@@ -313,7 +330,9 @@ ${email.bodyText}`
 
   const allSubs = results.filter((s) => s.isSubscription)
 
-  // ─── Deduplicate by normalized name OR sender domain ──────────────────────
+  // ─── Deduplicate by normalized name; use sender domain only for non-marketplace senders ──
+  // Marketplace domains (Apple App Store, Google Play, PayPal, Stripe, Amazon) send billing
+  // emails for many different services — grouping by their domain would merge unrelated services.
   const nameKeyToCanonical = new Map<string, string>()
   const domainToCanonical = new Map<string, string>()
   const groups = new Map<string, ParsedSub[]>()
@@ -322,34 +341,48 @@ ${email.bodyText}`
     const nameKey = normalizeName(sub.serviceName || "")
     if (!nameKey) continue
     const domain = senderDomain(sub.from || "")
+    const isMarketplace = MARKETPLACE_DOMAINS.has(domain)
 
     const canonical =
       ALIAS_MAP[nameKey] ??
       nameKeyToCanonical.get(nameKey) ??
-      (domain ? domainToCanonical.get(domain) : undefined) ??
+      // Skip domain-based grouping for marketplace senders — they host multiple services
+      (!isMarketplace && domain ? domainToCanonical.get(domain) : undefined) ??
       nameKey
 
     if (!nameKeyToCanonical.has(nameKey)) nameKeyToCanonical.set(nameKey, canonical)
-    if (domain && !domainToCanonical.has(domain)) domainToCanonical.set(domain, canonical)
+    if (!isMarketplace && domain && !domainToCanonical.has(domain)) {
+      domainToCanonical.set(domain, canonical)
+    }
     if (!groups.has(canonical)) groups.set(canonical, [])
     groups.get(canonical)!.push(sub)
   }
 
-  // ─── Containment merge: absorb longer keys that contain a shorter key as a ──
-  // contiguous word sequence (e.g. "new york times" absorbs "new york times digital")
+  // Log group membership before containment merge
+  for (const [canonical, group] of groups) {
+    console.log(
+      `[scan] group "${canonical}" (${group.length} email${group.length === 1 ? "" : "s"}):`,
+      group.map((s) => `"${s.serviceName}" from <${s.from}> — "${s.subject}"`).join(" | ")
+    )
+  }
+
+  // ─── Containment merge: absorb groups whose key is a word-supersequence of a ─
+  // shorter key — e.g. "new york times digital" absorbed into "new york times".
+  // Only compares service-name keys, never sender domains.
+  // Requires the shorter key to have ≥ 2 words to avoid false single-word merges.
   {
     const snapshot = Array.from(groups.keys())
     for (const shorter of snapshot) {
       const sw = shorter.split(" ")
-      if (sw.length < 2) continue          // single-word keys: skip to avoid false merges
-      if (!groups.has(shorter)) continue   // already absorbed into something else
+      if (sw.length < 2) continue
+      if (!groups.has(shorter)) continue
       for (const longer of snapshot) {
         if (longer === shorter || !groups.has(longer)) continue
         const lw = longer.split(" ")
         if (lw.length <= sw.length) continue
-        // Check if sw appears as a contiguous word run anywhere inside lw
         const found = lw.some((_, i) => sw.every((w, j) => lw[i + j] === w))
         if (found) {
+          console.log(`[scan] containment merge: "${longer}" → "${shorter}"`)
           groups.get(shorter)!.push(...groups.get(longer)!)
           groups.delete(longer)
         }
@@ -434,7 +467,19 @@ ${email.bodyText}`
     }
   }
 
-  console.log("[scan] final deduplicated list:", JSON.stringify(deduped.map((s) => ({ serviceName: s.serviceName, status: s.status, renewalDate: s.renewalDate, amount: s.amount, currency: s.currency }))))
+  console.log(
+    "[scan] final deduplicated list:",
+    JSON.stringify(
+      deduped.map((s) => ({
+        serviceName: s.serviceName,
+        status: s.status,
+        renewalDate: s.renewalDate,
+        amount: s.amount,
+        currency: s.currency,
+        isTrial: s.isTrial,
+      }))
+    )
+  )
 
   const trials = deduped.filter((s) => s.isTrial)
   const subscriptions = deduped.filter((s) => !s.isTrial)
